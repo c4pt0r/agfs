@@ -1,6 +1,7 @@
 import unittest
 import tempfile
 import os
+from unittest.mock import Mock, MagicMock
 from agfs_shell.builtins import BUILTINS
 from agfs_shell.process import Process
 from agfs_shell.streams import InputStream, OutputStream, ErrorStream
@@ -142,6 +143,108 @@ class TestBuiltins(unittest.TestCase):
         proc = self.create_process("tr", ["a"], input_data)
         self.assertEqual(cmd(proc), 1)
         self.assertIn(b"missing operand", proc.get_stderr())
+
+    def test_ls_multiple_files(self):
+        """Test ls command with multiple file arguments (like from glob expansion)"""
+        cmd = BUILTINS['ls']
+
+        # Create a mock filesystem
+        mock_fs = Mock()
+
+        # Mock get_file_info to return file info for each path
+        def mock_get_file_info(path):
+            # Simulate file metadata
+            if path.endswith('.txt'):
+                return {
+                    'name': os.path.basename(path),
+                    'isDir': False,
+                    'size': 100,
+                    'modTime': '2025-11-23T12:00:00Z',
+                    'mode': 'rw-r--r--'
+                }
+            else:
+                raise Exception(f"No such file: {path}")
+
+        mock_fs.get_file_info = mock_get_file_info
+
+        # Test with multiple file paths (simulating glob expansion like 'ls *.txt')
+        proc = self.create_process("ls", [
+            "/test/file1.txt",
+            "/test/file2.txt",
+            "/test/file3.txt"
+        ])
+        proc.filesystem = mock_fs
+
+        exit_code = cmd(proc)
+        self.assertEqual(exit_code, 0)
+
+        # Check output contains all files
+        output = proc.get_stdout().decode('utf-8')
+        self.assertIn('file1.txt', output)
+        self.assertIn('file2.txt', output)
+        self.assertIn('file3.txt', output)
+
+        # Verify each file listed once
+        self.assertEqual(output.count('file1.txt'), 1)
+        self.assertEqual(output.count('file2.txt'), 1)
+        self.assertEqual(output.count('file3.txt'), 1)
+
+    def test_ls_mixed_files_and_dirs(self):
+        """Test ls command with mix of files and directories"""
+        cmd = BUILTINS['ls']
+
+        # Create a mock filesystem
+        mock_fs = Mock()
+
+        # Mock get_file_info to return file/dir info
+        def mock_get_file_info(path):
+            if path == "/test/dir1":
+                return {
+                    'name': 'dir1',
+                    'isDir': True,
+                    'size': 0,
+                    'modTime': '2025-11-23T12:00:00Z'
+                }
+            elif path.endswith('.txt'):
+                return {
+                    'name': os.path.basename(path),
+                    'isDir': False,
+                    'size': 100,
+                    'modTime': '2025-11-23T12:00:00Z'
+                }
+            else:
+                raise Exception(f"No such file: {path}")
+
+        # Mock list_directory for the directory
+        def mock_list_directory(path):
+            if path == "/test/dir1":
+                return [
+                    {'name': 'subfile1.txt', 'isDir': False, 'size': 50},
+                    {'name': 'subfile2.txt', 'isDir': False, 'size': 60}
+                ]
+            else:
+                raise Exception(f"Not a directory: {path}")
+
+        mock_fs.get_file_info = mock_get_file_info
+        mock_fs.list_directory = mock_list_directory
+
+        # Test with mix of file and directory
+        proc = self.create_process("ls", [
+            "/test/file1.txt",
+            "/test/dir1"
+        ])
+        proc.filesystem = mock_fs
+
+        exit_code = cmd(proc)
+        self.assertEqual(exit_code, 0)
+
+        # Check output
+        output = proc.get_stdout().decode('utf-8')
+        # File should be listed
+        self.assertIn('file1.txt', output)
+        # Directory contents should be listed
+        self.assertIn('subfile1.txt', output)
+        self.assertIn('subfile2.txt', output)
 
 if __name__ == '__main__':
     unittest.main()

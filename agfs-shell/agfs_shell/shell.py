@@ -12,6 +12,7 @@ from .builtins import get_builtin
 from .filesystem import AGFSFileSystem
 from .command_decorators import CommandMetadata
 from pyagfs import AGFSClientError
+from . import __version__
 
 
 class Shell:
@@ -916,7 +917,7 @@ class Shell:
  /\\ / _ |_ (_  
 /--\\\\__)|  __) 
         """)
-        self.console.print("[bold cyan]agfs-shell[/bold cyan] v1.1.0", highlight=False)
+        self.console.print(f"[bold cyan]agfs-shell[/bold cyan] v{__version__}", highlight=False)
 
         # Check server connection - exit if failed
         if not self.filesystem.check_connection():
