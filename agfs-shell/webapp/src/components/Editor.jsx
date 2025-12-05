@@ -1,8 +1,18 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, forwardRef, useImperativeHandle } from 'react';
 import MonacoEditor from '@monaco-editor/react';
 
-const Editor = ({ file, content, onSave }) => {
+const Editor = forwardRef(({ file, content, onSave, onChange }, ref) => {
   const editorRef = useRef(null);
+
+  // Expose save method to parent via ref
+  useImperativeHandle(ref, () => ({
+    save: () => {
+      if (editorRef.current) {
+        const value = editorRef.current.getValue();
+        onSave(value);
+      }
+    }
+  }));
 
   const handleEditorDidMount = (editor, monaco) => {
     editorRef.current = editor;
@@ -15,7 +25,10 @@ const Editor = ({ file, content, onSave }) => {
   };
 
   const handleEditorChange = (value) => {
-    // Auto-save could be implemented here
+    // Notify parent of content change
+    if (onChange) {
+      onChange(value);
+    }
   };
 
   return (
@@ -58,7 +71,7 @@ const Editor = ({ file, content, onSave }) => {
       </div>
     </>
   );
-};
+});
 
 // Helper function to determine language from file extension
 const getLanguageFromFilename = (filename) => {

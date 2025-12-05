@@ -282,38 +282,148 @@ class WebAppServer:
                     status=400
                 )
 
-            # Create temp file with content
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.tmp') as tmp:
-                tmp.write(content)
-                tmp_path = tmp.name
-
+            # Write file using filesystem API directly
             try:
-                # Use shell to write file
-                # Read from temp file and write to target
-                old_stdout = sys.stdout
-                old_stderr = sys.stderr
-                sys.stdout = io.StringIO()
-                sys.stderr = io.StringIO()
+                # Convert content to bytes
+                content_bytes = content.encode('utf-8')
 
-                try:
-                    # Use cat to read temp file and redirect to target
-                    exit_code = self.shell.execute(f'cat {tmp_path} > {path}')
+                # Write to filesystem
+                self.shell.filesystem.write_file(path, content_bytes)
 
-                    if exit_code != 0:
-                        return web.json_response(
-                            {'error': 'Failed to write file'},
-                            status=500
-                        )
-                finally:
-                    sys.stdout = old_stdout
-                    sys.stderr = old_stderr
-            finally:
-                # Clean up temp file
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
+                return web.json_response({'success': True})
+            except Exception as e:
+                return web.json_response(
+                    {'error': f'Failed to write file: {str(e)}'},
+                    status=500
+                )
+
+        except Exception as e:
+            return web.json_response(
+                {'error': str(e)},
+                status=500
+            )
+
+    async def handle_download_file(self, request):
+        """Download file contents (for binary/non-text files)"""
+        path = request.query.get('path', '')
+
+        if not path:
+            return web.json_response(
+                {'error': 'Path is required'},
+                status=400
+            )
+
+        try:
+            # Read file using filesystem API
+            content = self.shell.filesystem.read_file(path)
+
+            # Get filename from path
+            filename = path.split('/')[-1]
+
+            # Determine content type based on extension
+            import mimetypes
+            content_type, _ = mimetypes.guess_type(filename)
+            if content_type is None:
+                content_type = 'application/octet-stream'
+
+            # Return file with download headers
+            return web.Response(
+                body=content,
+                headers={
+                    'Content-Type': content_type,
+                    'Content-Disposition': f'attachment; filename="{filename}"'
+                }
+            )
+
+        except Exception as e:
+            return web.json_response(
+                {'error': str(e)},
+                status=500
+            )
+
+    async def handle_copy_file(self, request):
+        """Copy file from source to target"""
+        try:
+            data = await request.json()
+            source_path = data.get('sourcePath', '')
+            target_path = data.get('targetPath', '')
+
+            if not source_path or not target_path:
+                return web.json_response(
+                    {'error': 'Source and target paths are required'},
+                    status=400
+                )
+
+            # Read source file
+            content = self.shell.filesystem.read_file(source_path)
+
+            # Write to target
+            self.shell.filesystem.write_file(target_path, content)
 
             return web.json_response({'success': True})
+
+        except Exception as e:
+            return web.json_response(
+                {'error': str(e)},
+                status=500
+            )
+
+    async def handle_delete_file(self, request):
+        """Delete a file or directory"""
+        try:
+            data = await request.json()
+            path = data.get('path', '')
+
+            if not path:
+                return web.json_response(
+                    {'error': 'Path is required'},
+                    status=400
+                )
+
+            # Delete using filesystem API
+            self.shell.filesystem.delete_file(path)
+
+            return web.json_response({'success': True})
+
+        except Exception as e:
+            return web.json_response(
+                {'error': str(e)},
+                status=500
+            )
+
+    async def handle_upload_file(self, request):
+        """Upload a file to the filesystem"""
+        try:
+            reader = await request.multipart()
+
+            directory = '/'
+            file_data = None
+            filename = None
+
+            # Read multipart data
+            async for field in reader:
+                if field.name == 'directory':
+                    directory = await field.text()
+                elif field.name == 'file':
+                    filename = field.filename
+                    file_data = await field.read()
+
+            if not file_data or not filename:
+                return web.json_response(
+                    {'error': 'No file provided'},
+                    status=400
+                )
+
+            # Construct target path
+            target_path = f"{directory.rstrip('/')}/{filename}" if directory != '/' else f"/{filename}"
+
+            # Write file to filesystem
+            self.shell.filesystem.write_file(target_path, file_data)
+
+            return web.json_response({
+                'success': True,
+                'path': target_path
+            })
 
         except Exception as e:
             return web.json_response(
@@ -476,6 +586,10 @@ class WebAppServer:
             self.app.router.add_get('/api/files/list', self.handle_list_files),
             self.app.router.add_get('/api/files/read', self.handle_read_file),
             self.app.router.add_post('/api/files/write', self.handle_write_file),
+            self.app.router.add_get('/api/files/download', self.handle_download_file),
+            self.app.router.add_post('/api/files/copy', self.handle_copy_file),
+            self.app.router.add_post('/api/files/delete', self.handle_delete_file),
+            self.app.router.add_post('/api/files/upload', self.handle_upload_file),
         ]
 
         # WebSocket route (no CORS needed)
