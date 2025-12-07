@@ -1737,13 +1737,16 @@ def cmd_plugins(process: Process) -> int:
         -v                Show detailed configuration parameters
 
     Path formats for load:
-        <agfs_path>        - Load from AGFS (default)
+        <relative_path>    - Load from AGFS (relative to current directory)
+        <absolute_path>    - Load from AGFS (absolute path)
         http(s)://<url>    - Load from HTTP(S) URL
 
     Examples:
         plugins list                                  # List all plugins
         plugins list -v                               # List with config details
-        plugins load /mnt/plugins/myplugin.so         # Load from AGFS
+        plugins load /mnt/plugins/myplugin.so         # Load from AGFS (absolute)
+        plugins load myplugin.so                      # Load from current directory
+        plugins load ../plugins/myplugin.so           # Load from relative path
         plugins load https://example.com/myplugin.so  # Load from HTTP(S)
         plugins unload /mnt/plugins/myplugin.so       # Unload plugin
     """
@@ -1759,12 +1762,15 @@ def cmd_plugins(process: Process) -> int:
         process.stderr.write("  load <path>    - Load external plugin\n")
         process.stderr.write("  unload <path>  - Unload external plugin\n")
         process.stderr.write("\nPath formats for load:\n")
-        process.stderr.write("  <agfs_path>      - Load from AGFS (default)\n")
+        process.stderr.write("  <relative_path>  - Load from AGFS (relative to current directory)\n")
+        process.stderr.write("  <absolute_path>  - Load from AGFS (absolute path)\n")
         process.stderr.write("  http(s)://<url>  - Load from HTTP(S) URL\n")
         process.stderr.write("\nExamples:\n")
         process.stderr.write("  plugins list\n")
-        process.stderr.write("  plugins load /mnt/plugins/myplugin.so\n")
-        process.stderr.write("  plugins load https://example.com/myplugin.so\n")
+        process.stderr.write("  plugins load /mnt/plugins/myplugin.so         # Absolute path\n")
+        process.stderr.write("  plugins load myplugin.so                      # Current directory\n")
+        process.stderr.write("  plugins load ../plugins/myplugin.so           # Relative path\n")
+        process.stderr.write("  plugins load https://example.com/myplugin.so  # HTTP(S) URL\n")
         return 1
 
     # Handle plugin subcommands
@@ -1774,11 +1780,14 @@ def cmd_plugins(process: Process) -> int:
         if len(process.args) < 2:
             process.stderr.write("Usage: plugins load <path>\n")
             process.stderr.write("\nPath formats:\n")
-            process.stderr.write("  <agfs_path>      - Load from AGFS (default)\n")
+            process.stderr.write("  <relative_path>  - Load from AGFS (relative to current directory)\n")
+            process.stderr.write("  <absolute_path>  - Load from AGFS (absolute path)\n")
             process.stderr.write("  http(s)://<url>  - Load from HTTP(S) URL\n")
             process.stderr.write("\nExamples:\n")
-            process.stderr.write("  plugins load /mnt/plugins/myplugin.so        # From AGFS\n")
-            process.stderr.write("  plugins load https://example.com/myplugin.so # From HTTP(S)\n")
+            process.stderr.write("  plugins load /mnt/plugins/myplugin.so        # Absolute path\n")
+            process.stderr.write("  plugins load myplugin.so                     # Current directory\n")
+            process.stderr.write("  plugins load ../plugins/myplugin.so          # Relative path\n")
+            process.stderr.write("  plugins load https://example.com/myplugin.so # HTTP(S) URL\n")
             return 1
 
         path = process.args[1]
@@ -1791,7 +1800,12 @@ def cmd_plugins(process: Process) -> int:
             # HTTP(S) URL: use as-is, server will download it
             library_path = path
         else:
-            # Default: treat as AGFS path, add agfs:// prefix
+            # AGFS path: resolve relative paths and add agfs:// prefix
+            # Resolve relative paths to absolute paths
+            if not path.startswith('/'):
+                # Relative path - resolve based on current working directory
+                cwd = getattr(process, 'cwd', '/')
+                path = os.path.normpath(os.path.join(cwd, path))
             library_path = f"agfs://{path}"
 
         try:
