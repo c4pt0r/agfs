@@ -331,9 +331,23 @@ const Terminal = ({ wsRef }) => {
 
     window.addEventListener('resize', handleResize);
 
+    // Prevent Ctrl+W from closing the browser tab
+    // Use capture phase and window-level listener for reliability
+    const handleKeyDown = (e) => {
+      // Check for Ctrl+W (or Cmd+W on Mac)
+      if ((e.ctrlKey || e.metaKey) && e.key === 'w') {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+
+    // Add keydown listener to window with capture phase
+    window.addEventListener('keydown', handleKeyDown, true);
+
     // Cleanup
     return () => {
       window.removeEventListener('resize', handleResize);
+      window.removeEventListener('keydown', handleKeyDown, true);
       if (ws.readyState === WebSocket.OPEN) {
         ws.close();
       }
