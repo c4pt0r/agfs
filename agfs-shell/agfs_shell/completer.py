@@ -1,6 +1,7 @@
 """Tab completion support for agfs-shell"""
 
 import os
+import shlex
 from typing import List, Optional
 from .builtins import BUILTINS
 from .filesystem import AGFSFileSystem
@@ -54,10 +55,29 @@ class ShellCompleter:
         matches = [cmd for cmd in self.command_names if cmd.startswith(text)]
         return matches
 
+    def _needs_quoting(self, path: str) -> bool:
+        """Check if a path needs to be quoted"""
+        # Characters that require quoting in shell
+        special_chars = ' \t\n|&;<>()$`\\"\''
+        return any(c in path for c in special_chars)
+
+    def _quote_if_needed(self, path: str) -> str:
+        """Quote a path if it contains spaces or special characters"""
+        if self._needs_quoting(path):
+            # Use shlex.quote for proper shell quoting
+            return shlex.quote(path)
+        return path
+
     def _complete_path(self, text: str) -> List[str]:
         """Complete AGFS paths"""
         # Get current working directory
         cwd = self.shell.cwd if self.shell else '/'
+
+        # Track if the text starts with a quote
+        quote_char = None
+        if text and text[0] in ('"', "'"):
+            quote_char = text[0]
+            text = text[1:]  # Remove the leading quote for path matching
 
         # Handle empty text - list current directory
         if not text:
@@ -114,18 +134,29 @@ class ShellCompleter:
                         abs_path += '/'
 
                     # Convert to relative path if needed
+                    final_path = None
                     if return_relative and cwd != '/':
                         # Make path relative to cwd
                         if abs_path.startswith(cwd + '/'):
-                            rel_path = abs_path[len(cwd) + 1:]
-                            matches.append(rel_path)
+                            final_path = abs_path[len(cwd) + 1:]
                         elif abs_path == cwd:
-                            matches.append('.')
+                            final_path = '.'
                         else:
                             # Path not under cwd, use absolute
-                            matches.append(abs_path)
+                            final_path = abs_path
                     else:
-                        matches.append(abs_path)
+                        final_path = abs_path
+
+                    # Quote the path if needed
+                    if quote_char:
+                        # User started with a quote, so add matching quote
+                        # Don't use shlex.quote as user already provided quote
+                        final_path = f"{quote_char}{final_path}{quote_char}"
+                    else:
+                        # Auto-quote if the path needs it
+                        final_path = self._quote_if_needed(final_path)
+
+                    matches.append(final_path)
 
             return sorted(matches)
         except Exception:

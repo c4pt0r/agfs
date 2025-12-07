@@ -65,5 +65,27 @@ class TestCommandParser(unittest.TestCase):
         self.assertEqual(CommandParser.unquote_arg('"world"'), "world")
         self.assertEqual(CommandParser.unquote_arg("simple"), "simple")
 
+    def test_parse_filenames_with_spaces(self):
+        """Test parsing filenames with spaces using quotes"""
+        # Double quotes
+        cmd = 'rm "Ed Huang - 2024 US filing authorization forms.PDF"'
+        commands, _ = CommandParser.parse_command_line(cmd)
+        self.assertEqual(commands, [('rm', ['Ed Huang - 2024 US filing authorization forms.PDF'])])
+
+        # Single quotes
+        cmd = "rm 'Ed Huang - 2024 US filing authorization forms.PDF'"
+        commands, _ = CommandParser.parse_command_line(cmd)
+        self.assertEqual(commands, [('rm', ['Ed Huang - 2024 US filing authorization forms.PDF'])])
+
+        # Multiple files with spaces
+        cmd = 'rm "file 1.txt" "file 2.txt" normal.txt'
+        commands, _ = CommandParser.parse_command_line(cmd)
+        self.assertEqual(commands, [('rm', ['file 1.txt', 'file 2.txt', 'normal.txt'])])
+
+        # ls with filename containing spaces
+        cmd = 'ls -l "2. 【清洁版】INSTRUMENT OF TRANSFER.doc"'
+        commands, _ = CommandParser.parse_command_line(cmd)
+        self.assertEqual(commands, [('ls', ['-l', '2. 【清洁版】INSTRUMENT OF TRANSFER.doc'])])
+
 if __name__ == '__main__':
     unittest.main()
