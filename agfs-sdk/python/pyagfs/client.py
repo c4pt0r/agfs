@@ -454,6 +454,7 @@ class AGFSClient:
             - library_path: Path to plugin library (for external plugins)
             - is_external: Whether this is an external plugin
             - mounted_paths: List of mount point information
+            - config_params: List of configuration parameters (name, type, required, default, description)
         """
         try:
             response = self.session.get(

@@ -1,6 +1,6 @@
 """AGFS Python SDK - Client library for AGFS Server API"""
 
-__version__ = "0.1.2"
+__version__ = "0.1.5"
 
 from .client import AGFSClient
 from .exceptions import AGFSClientError, AGFSConnectionError, AGFSTimeoutError, AGFSHTTPError
