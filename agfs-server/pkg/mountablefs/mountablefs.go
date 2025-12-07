@@ -3,15 +3,16 @@ package mountablefs
 import (
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/c4pt0r/agfs/agfs-server/pkg/filesystem"
 	"github.com/c4pt0r/agfs/agfs-server/pkg/plugin"
 	"github.com/c4pt0r/agfs/agfs-server/pkg/plugin/api"
 	"github.com/c4pt0r/agfs/agfs-server/pkg/plugin/loader"
+	iradix "github.com/hashicorp/go-immutable-radix"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -33,23 +34,25 @@ type PluginFactory func() plugin.ServicePlugin
 
 // MountableFS is a FileSystem that supports mounting service plugins at specific paths
 type MountableFS struct {
-	mounts             map[string]*MountPoint
-	mountPaths         []string // sorted by length (longest first) for prefix matching
+	// mountTree stores the radix tree for mount routing.
+	// We use atomic.Value to store *iradix.Tree to enable lock-free reads.
+	mountTree atomic.Value
+
 	pluginFactories    map[string]PluginFactory
 	pluginLoader       *loader.PluginLoader // For loading external plugins
 	pluginNameCounters map[string]int       // Track counters for plugin names
-	mu                 sync.RWMutex
+	mu                 sync.RWMutex         // Protects write operations (Mount/Unmount) and plugin factories
 }
 
 // NewMountableFS creates a new mountable file system with the specified WASM pool configuration
 func NewMountableFS(poolConfig api.PoolConfig) *MountableFS {
-	return &MountableFS{
-		mounts:             make(map[string]*MountPoint),
-		mountPaths:         []string{},
+	mfs := &MountableFS{
 		pluginFactories:    make(map[string]PluginFactory),
 		pluginLoader:       loader.NewPluginLoader(poolConfig),
 		pluginNameCounters: make(map[string]int),
 	}
+	mfs.mountTree.Store(iradix.New())
+	return mfs
 }
 
 // GetPluginLoader returns the plugin loader instance
@@ -127,21 +130,23 @@ func (mfs *MountableFS) Mount(path string, plugin plugin.ServicePlugin) error {
 	// Normalize path
 	path = filesystem.NormalizePath(path)
 
+	// Load current tree
+	tree := mfs.mountTree.Load().(*iradix.Tree)
+
 	// Check if path is already mounted
-	if _, exists := mfs.mounts[path]; exists {
+	if _, exists := tree.Get([]byte(path)); exists {
 		return filesystem.NewAlreadyExistsError("mount", path)
 	}
 
-	// Add mount (no config for static mounts)
-	mfs.mounts[path] = &MountPoint{
+	// Create new tree with added mount
+	newTree, _, _ := tree.Insert([]byte(path), &MountPoint{
 		Path:   path,
 		Plugin: plugin,
 		Config: make(map[string]interface{}),
-	}
+	})
 
-	// Update mount paths list and sort by length (longest first)
-	mfs.mountPaths = append(mfs.mountPaths, path)
-	mfs.sortMountPaths()
+	// Atomically update tree
+	mfs.mountTree.Store(newTree)
 
 	return nil
 }
@@ -154,8 +159,11 @@ func (mfs *MountableFS) MountPlugin(fstype string, path string, config map[strin
 	// Normalize path
 	path = filesystem.NormalizePath(path)
 
+	// Load current tree
+	tree := mfs.mountTree.Load().(*iradix.Tree)
+
 	// Check if path is already mounted
-	if _, exists := mfs.mounts[path]; exists {
+	if _, exists := tree.Get([]byte(path)); exists {
 		return filesystem.NewAlreadyExistsError("mount", path)
 	}
 
@@ -169,7 +177,6 @@ func (mfs *MountableFS) MountPlugin(fstype string, path string, config map[strin
 	pluginInstance := factory()
 
 	// Special handling for plugins that need rootFS reference
-	// Check if plugin has SetRootFS method (e.g., httpfs, proxyfs)
 	type rootFSSetter interface {
 		SetRootFS(filesystem.FileSystem)
 	}
@@ -178,7 +185,7 @@ func (mfs *MountableFS) MountPlugin(fstype string, path string, config map[strin
 		log.Debugf("Set rootFS for plugin %s at %s", fstype, path)
 	}
 
-	// Inject mount_path into config for plugins that need to know their virtual path
+	// Inject mount_path into config
 	configWithPath := make(map[string]interface{})
 	for k, v := range config {
 		configWithPath[k] = v
@@ -195,16 +202,15 @@ func (mfs *MountableFS) MountPlugin(fstype string, path string, config map[strin
 		return fmt.Errorf("failed to initialize plugin: %v", err)
 	}
 
-	// Add mount
-	mfs.mounts[path] = &MountPoint{
+	// Create new tree with added mount
+	newTree, _, _ := tree.Insert([]byte(path), &MountPoint{
 		Path:   path,
 		Plugin: pluginInstance,
 		Config: config,
-	}
+	})
 
-	// Update mount paths list and sort by length (longest first)
-	mfs.mountPaths = append(mfs.mountPaths, path)
-	mfs.sortMountPaths()
+	// Atomically update tree
+	mfs.mountTree.Store(newTree)
 
 	log.Infof("mounted %s at %s", fstype, path)
 	return nil
@@ -217,25 +223,25 @@ func (mfs *MountableFS) Unmount(path string) error {
 
 	path = filesystem.NormalizePath(path)
 
-	mount, exists := mfs.mounts[path]
+	// Load current tree
+	tree := mfs.mountTree.Load().(*iradix.Tree)
+
+	val, exists := tree.Get([]byte(path))
 	if !exists {
 		return fmt.Errorf("no mount at path: %s", path)
 	}
+	mount := val.(*MountPoint)
 
 	// Shutdown the plugin
 	if err := mount.Plugin.Shutdown(); err != nil {
 		return fmt.Errorf("failed to shutdown plugin: %v", err)
 	}
 
-	delete(mfs.mounts, path)
+	// Create new tree without the mount
+	newTree, _, _ := tree.Delete([]byte(path))
 
-	// Remove from mount paths
-	for i, p := range mfs.mountPaths {
-		if p == path {
-			mfs.mountPaths = append(mfs.mountPaths[:i], mfs.mountPaths[i+1:]...)
-			break
-		}
-	}
+	// Atomically update tree
+	mfs.mountTree.Store(newTree)
 
 	log.Infof("Unmounted plugin at %s", path)
 	return nil
@@ -259,8 +265,6 @@ func (mfs *MountableFS) LoadExternalPluginWithType(libraryPath string, pluginTyp
 	// Register the plugin as a factory so it can be mounted
 	pluginName := p.Name()
 	mfs.RegisterPluginFactory(pluginName, func() plugin.ServicePlugin {
-		// For external plugins, we need to return the already loaded instance
-		// since we can't create new instances from the loaded library
 		return p
 	})
 
@@ -269,8 +273,6 @@ func (mfs *MountableFS) LoadExternalPluginWithType(libraryPath string, pluginTyp
 }
 
 // LoadExternalPlugin loads a plugin from a shared library file
-// The plugin type is automatically detected based on file content
-// If a plugin with the same name already exists, automatically appends a numeric suffix
 func (mfs *MountableFS) LoadExternalPlugin(libraryPath string) (plugin.ServicePlugin, error) {
 	// Detect plugin type first
 	pluginType, err := loader.DetectPluginType(libraryPath)
@@ -278,23 +280,19 @@ func (mfs *MountableFS) LoadExternalPlugin(libraryPath string) (plugin.ServicePl
 		return nil, fmt.Errorf("failed to detect plugin type: %w", err)
 	}
 
-	// For WASM plugins, use LoadExternalPluginWithType to pass host filesystem
 	if pluginType == loader.PluginTypeWASM {
 		return mfs.LoadExternalPluginWithType(libraryPath, pluginType)
 	}
 
-	// For other plugin types, use regular loading
 	p, err := mfs.pluginLoader.LoadPlugin(libraryPath)
 	if err != nil {
 		return nil, err
 	}
 
-	// Get original plugin name
 	originalName := p.Name()
 
 	mfs.mu.Lock()
 
-	// Generate unique name
 	finalName := mfs.generateUniquePluginName(originalName)
 	renamed := (finalName != originalName)
 
@@ -302,7 +300,6 @@ func (mfs *MountableFS) LoadExternalPlugin(libraryPath string) (plugin.ServicePl
 		log.Infof("Plugin name '%s' already exists, using '%s' instead", originalName, finalName)
 	}
 
-	// Create wrapped plugin if renamed
 	var pluginToRegister plugin.ServicePlugin = p
 	if renamed {
 		pluginToRegister = &RenamedPlugin{
@@ -312,10 +309,7 @@ func (mfs *MountableFS) LoadExternalPlugin(libraryPath string) (plugin.ServicePl
 		}
 	}
 
-	// Register the plugin with final name
 	mfs.pluginFactories[finalName] = func() plugin.ServicePlugin {
-		// For external plugins, we need to return the already loaded instance
-		// since we can't create new instances from the loaded library
 		return pluginToRegister
 	}
 
@@ -323,7 +317,6 @@ func (mfs *MountableFS) LoadExternalPlugin(libraryPath string) (plugin.ServicePl
 
 	log.Infof("Registered external plugin factory: %s", finalName)
 
-	// Return wrapped plugin if renamed
 	if renamed {
 		return &RenamedPlugin{
 			ServicePlugin: p,
@@ -341,7 +334,6 @@ func (mfs *MountableFS) UnloadExternalPluginWithType(libraryPath string, pluginT
 }
 
 // UnloadExternalPlugin unloads an external plugin
-// The plugin type is automatically detected based on file content
 func (mfs *MountableFS) UnloadExternalPlugin(libraryPath string) error {
 	return mfs.pluginLoader.UnloadPlugin(libraryPath)
 }
@@ -361,12 +353,10 @@ func (mfs *MountableFS) GetBuiltinPluginNames() []string {
 	mfs.mu.RLock()
 	defer mfs.mu.RUnlock()
 
-	// Get external plugin names to exclude them
 	externalPlugins := mfs.pluginLoader.GetPluginNameToPathMap()
 
 	names := make([]string, 0)
 	for name := range mfs.pluginFactories {
-		// Only include plugins that are not external
 		if _, isExternal := externalPlugins[name]; !isExternal {
 			names = append(names, name)
 		}
@@ -381,50 +371,62 @@ func (mfs *MountableFS) LoadExternalPluginsFromDirectory(dir string) ([]string, 
 
 // GetMounts returns all mount points
 func (mfs *MountableFS) GetMounts() []*MountPoint {
-	mfs.mu.RLock()
-	defer mfs.mu.RUnlock()
+	// Lock-free read
+	tree := mfs.mountTree.Load().(*iradix.Tree)
 
-	mounts := make([]*MountPoint, 0, len(mfs.mounts))
-	for _, mount := range mfs.mounts {
-		mounts = append(mounts, mount)
-	}
+	var mounts []*MountPoint
+	tree.Root().Walk(func(k []byte, v interface{}) bool {
+		mounts = append(mounts, v.(*MountPoint))
+		return false
+	})
 	return mounts
 }
 
-// findMount finds the mount point for a given path
+// findMount finds the mount point for a given path using lock-free radix tree lookup
 // Returns the mount and the relative path within the mount
 func (mfs *MountableFS) findMount(path string) (*MountPoint, string, bool) {
 	path = filesystem.NormalizePath(path)
 
-	// Check each mount path (longest first)
-	for _, mountPath := range mfs.mountPaths {
-		if path == mountPath {
-			// Exact match - path is the mount point itself
-			return mfs.mounts[mountPath], "/", true
-		}
-		if strings.HasPrefix(path, mountPath+"/") {
-			// Path is under this mount
-			relPath := strings.TrimPrefix(path, mountPath)
-			return mfs.mounts[mountPath], relPath, true
-		}
+	// Lock-free read
+	tree := mfs.mountTree.Load().(*iradix.Tree)
+
+	// LongestPrefix match
+	k, v, found := tree.Root().LongestPrefix([]byte(path))
+	if !found {
+		return nil, "", false
 	}
 
-	return nil, "", false
-}
+	mountPath := string(k)
 
-// sortMountPaths sorts mount paths by length (longest first) for correct prefix matching
-func (mfs *MountableFS) sortMountPaths() {
-	sort.Slice(mfs.mountPaths, func(i, j int) bool {
-		return len(mfs.mountPaths[i]) > len(mfs.mountPaths[j])
-	})
+	// Verify prefix boundary to ensure we don't match "/mnt-foo" against "/mnt"
+	// 1. Exact match
+	if len(path) == len(mountPath) {
+		mount := v.(*MountPoint)
+		return mount, "/", true
+	}
+
+	// 2. Subdirectory match (path must start with mountPath + "/")
+	// Case A: mountPath is "/" -> path matches "/..." which is correct
+	if mountPath == "/" {
+		mount := v.(*MountPoint)
+		return mount, path, true
+	}
+
+	// Case B: mountPath is "/mnt" -> path must be "/mnt/..."
+	if len(path) > len(mountPath) && path[len(mountPath)] == '/' {
+		mount := v.(*MountPoint)
+		relPath := path[len(mountPath):]
+		return mount, relPath, true
+	}
+
+	// Partial match failed (e.g. "/mnt-foo" matched "/mnt")
+	return nil, "", false
 }
 
 // Delegate all FileSystem methods to either base FS or mounted plugin
 
 func (mfs *MountableFS) Create(path string) error {
-	mfs.mu.RLock()
 	mount, relPath, found := mfs.findMount(path)
-	mfs.mu.RUnlock()
 
 	if found {
 		return mount.Plugin.GetFileSystem().Create(relPath)
@@ -433,9 +435,7 @@ func (mfs *MountableFS) Create(path string) error {
 }
 
 func (mfs *MountableFS) Mkdir(path string, perm uint32) error {
-	mfs.mu.RLock()
 	mount, relPath, found := mfs.findMount(path)
-	mfs.mu.RUnlock()
 
 	if found {
 		return mount.Plugin.GetFileSystem().Mkdir(relPath, perm)
@@ -444,9 +444,7 @@ func (mfs *MountableFS) Mkdir(path string, perm uint32) error {
 }
 
 func (mfs *MountableFS) Remove(path string) error {
-	mfs.mu.RLock()
 	mount, relPath, found := mfs.findMount(path)
-	mfs.mu.RUnlock()
 
 	if found {
 		return mount.Plugin.GetFileSystem().Remove(relPath)
@@ -455,9 +453,7 @@ func (mfs *MountableFS) Remove(path string) error {
 }
 
 func (mfs *MountableFS) RemoveAll(path string) error {
-	mfs.mu.RLock()
 	mount, relPath, found := mfs.findMount(path)
-	mfs.mu.RUnlock()
 
 	if found {
 		return mount.Plugin.GetFileSystem().RemoveAll(relPath)
@@ -466,9 +462,7 @@ func (mfs *MountableFS) RemoveAll(path string) error {
 }
 
 func (mfs *MountableFS) Read(path string, offset int64, size int64) ([]byte, error) {
-	mfs.mu.RLock()
 	mount, relPath, found := mfs.findMount(path)
-	mfs.mu.RUnlock()
 
 	if found {
 		return mount.Plugin.GetFileSystem().Read(relPath, offset, size)
@@ -477,9 +471,7 @@ func (mfs *MountableFS) Read(path string, offset int64, size int64) ([]byte, err
 }
 
 func (mfs *MountableFS) Write(path string, data []byte) ([]byte, error) {
-	mfs.mu.RLock()
 	mount, relPath, found := mfs.findMount(path)
-	mfs.mu.RUnlock()
 
 	if found {
 		return mount.Plugin.GetFileSystem().Write(relPath, data)
@@ -488,49 +480,10 @@ func (mfs *MountableFS) Write(path string, data []byte) ([]byte, error) {
 }
 
 func (mfs *MountableFS) ReadDir(path string) ([]filesystem.FileInfo, error) {
-	mfs.mu.RLock()
-	defer mfs.mu.RUnlock()
-
-	// Normalize path
+	// Lock-free implementation
 	path = filesystem.NormalizePath(path)
 
-	// If listing root, show all top-level mount point directories
-	if path == "/" {
-		var infos []filesystem.FileInfo
-		seenDirs := make(map[string]bool)
-
-		for mountPath := range mfs.mounts {
-			// Extract the first level directory name
-			name := mountPath[1:] // Remove leading slash
-			if name == "" {
-				continue
-			}
-			// Get first component
-			firstSlash := strings.Index(name, "/")
-			if firstSlash > 0 {
-				name = name[:firstSlash]
-			}
-
-			// Add if not already seen
-			if !seenDirs[name] {
-				seenDirs[name] = true
-				infos = append(infos, filesystem.FileInfo{
-					Name:    name,
-					Size:    0,
-					Mode:    0755,
-					ModTime: time.Now(),
-					IsDir:   true,
-					Meta: filesystem.MetaData{
-						Name: "rootfs",
-						Type: MetaValueMountPoint,
-					},
-				})
-			}
-		}
-		return infos, nil
-	}
-
-	// Check if path is a mount point or within a mount
+	// 1. Check if we are listing a directory inside a mount
 	mount, relPath, found := mfs.findMount(path)
 	if found {
 		// Get contents from the mounted filesystem
@@ -539,44 +492,37 @@ func (mfs *MountableFS) ReadDir(path string) ([]filesystem.FileInfo, error) {
 			return nil, err
 		}
 
-		// Check if there are any child mounts under this path that should be shown
-		// Build the full path we're listing
-		fullPath := path
-		if relPath != "/" {
-			// We're listing a subdirectory within a mount
-			fullPath = mount.Path
-			if relPath != "/" {
-				fullPath = fullPath + relPath
-			}
-		}
-		pathPrefix := fullPath + "/"
-
-		// Find child mount points
-		seenDirs := make(map[string]bool)
-		for _, info := range infos {
-			seenDirs[info.Name] = true
+		// Also check for any nested mounts directly under this path
+		// e.g. mounted at /mnt, and we have /mnt/foo mounted
+		tree := mfs.mountTree.Load().(*iradix.Tree)
+		
+		// We want to find all mounts that are strictly children of `path`
+		// e.g. path="/mnt", mount="/mnt/foo" -> prefix match "/mnt/"
+		prefix := path
+		if !strings.HasSuffix(prefix, "/") {
+			prefix += "/"
 		}
 
-		// Look for mounts that are children of the current path
-		for mountPath := range mfs.mounts {
-			if strings.HasPrefix(mountPath, pathPrefix) {
-				// Extract the next level directory/mount name
-				remainder := strings.TrimPrefix(mountPath, pathPrefix)
-
-				// Get the first component of the remainder
-				var name string
-				slashIdx := strings.Index(remainder, "/")
-				if slashIdx > 0 {
-					name = remainder[:slashIdx]
-				} else {
-					name = remainder
+		// Walk prefix to find direct children
+		tree.Root().WalkPrefix([]byte(prefix), func(k []byte, v interface{}) bool {
+			mountPath := string(k)
+			// Only show direct children
+			// e.g. prefix="/mnt/", mountPath="/mnt/foo" -> OK
+			// mountPath="/mnt/foo/bar" -> SKIP (will be shown when listing /mnt/foo)
+			
+			rel := strings.TrimPrefix(mountPath, prefix)
+			if !strings.Contains(rel, "/") && rel != "" {
+				// Avoid duplicates if the plugin already reported it
+				exists := false
+				for _, info := range infos {
+					if info.Name == rel {
+						exists = true
+						break
+					}
 				}
-
-				// Add if not already seen
-				if !seenDirs[name] {
-					seenDirs[name] = true
+				if !exists {
 					infos = append(infos, filesystem.FileInfo{
-						Name:    name,
+						Name:    rel,
 						Size:    0,
 						Mode:    0755,
 						ModTime: time.Now(),
@@ -587,47 +533,51 @@ func (mfs *MountableFS) ReadDir(path string) ([]filesystem.FileInfo, error) {
 					})
 				}
 			}
-		}
+			return false
+		})
 
 		return infos, nil
 	}
 
-	// Check if path is a parent directory of mount points
-	// List all subdirectories/mounts under this path
-	pathPrefix := path + "/"
+	// 2. We are not in a mount, so we are listing the virtual root or intermediate directories
+	tree := mfs.mountTree.Load().(*iradix.Tree)
 	var infos []filesystem.FileInfo
 	seenDirs := make(map[string]bool)
 
-	for mountPath := range mfs.mounts {
-		if strings.HasPrefix(mountPath, pathPrefix) {
-			// Extract the next level directory/mount name
-			remainder := strings.TrimPrefix(mountPath, pathPrefix)
-
-			// Get the first component of the remainder
-			var name string
-			slashIdx := strings.Index(remainder, "/")
-			if slashIdx > 0 {
-				name = remainder[:slashIdx]
-			} else {
-				name = remainder
-			}
-
-			// Add if not already seen
-			if !seenDirs[name] {
-				seenDirs[name] = true
-				infos = append(infos, filesystem.FileInfo{
-					Name:    name,
-					Size:    0,
-					Mode:    0755,
-					ModTime: time.Now(),
-					IsDir:   true,
-					Meta: filesystem.MetaData{
-						Type: MetaValueMountPoint,
-					},
-				})
-			}
-		}
+	prefix := path
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
 	}
+
+	// Walk all keys that have this prefix
+	tree.Root().WalkPrefix([]byte(prefix), func(k []byte, v interface{}) bool {
+		mountPath := string(k)
+		
+		// Extract the next directory component
+		rel := strings.TrimPrefix(mountPath, prefix)
+		if rel == "" {
+			return false // Should not happen if path logic is correct (path is not a mount)
+		}
+
+		parts := strings.SplitN(rel, "/", 2)
+		nextDir := parts[0]
+
+		if !seenDirs[nextDir] {
+			seenDirs[nextDir] = true
+			infos = append(infos, filesystem.FileInfo{
+				Name:    nextDir,
+				Size:    0,
+				Mode:    0755,
+				ModTime: time.Now(),
+				IsDir:   true,
+				Meta: filesystem.MetaData{
+					Name: "rootfs",
+					Type: MetaValueMountPoint,
+				},
+			})
+		}
+		return false 
+	})
 
 	if len(infos) > 0 {
 		return infos, nil
@@ -637,9 +587,6 @@ func (mfs *MountableFS) ReadDir(path string) ([]filesystem.FileInfo, error) {
 }
 
 func (mfs *MountableFS) Stat(path string) (*filesystem.FileInfo, error) {
-	mfs.mu.RLock()
-	defer mfs.mu.RUnlock()
-
 	path = filesystem.NormalizePath(path)
 
 	// Check if path is root
@@ -664,11 +611,9 @@ func (mfs *MountableFS) Stat(path string) (*filesystem.FileInfo, error) {
 			return nil, err
 		}
 
-		// If querying the mount point itself (not a file within it),
-		// fix the name to show the mount point name instead of "/"
+		// Fix name if querying the mount point itself
 		if path == mount.Path && stat.Name == "/" {
-			// Extract the last component of the mount path
-			name := path[1:] // Remove leading slash
+			name := path[1:]
 			if lastSlash := strings.LastIndex(name, "/"); lastSlash >= 0 {
 				name = name[lastSlash+1:]
 			}
@@ -682,44 +627,47 @@ func (mfs *MountableFS) Stat(path string) (*filesystem.FileInfo, error) {
 	}
 
 	// Check if path is a parent directory of any mount points
-	// For example, /mnt when mounts exist at /mnt/queue and /mnt/kv
-	pathPrefix := path + "/"
-	for mountPath := range mfs.mounts {
-		if strings.HasPrefix(mountPath, pathPrefix) {
-			// This path is a parent directory of a mount point
-			name := path[1:] // Remove leading slash
-			if name == "" {
-				name = "/"
-			} else {
-				// Get the last component of the path
-				lastSlash := strings.LastIndex(name, "/")
-				if lastSlash >= 0 {
-					name = name[lastSlash+1:]
-				}
-			}
-			return &filesystem.FileInfo{
-				Name:    name,
-				Size:    0,
-				Mode:    0755,
-				ModTime: time.Now(),
-				IsDir:   true,
-				Meta: filesystem.MetaData{
-					Type: MetaValueMountPoint,
-				},
-			}, nil
+	// e.g. /mnt when /mnt/foo exists
+	tree := mfs.mountTree.Load().(*iradix.Tree)
+	prefix := path
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	
+	isParent := false
+	tree.Root().WalkPrefix([]byte(prefix), func(k []byte, v interface{}) bool {
+		isParent = true
+		return true // Stop iteration
+	})
+
+	if isParent {
+		name := path[1:]
+		if lastSlash := strings.LastIndex(name, "/"); lastSlash >= 0 {
+			name = name[lastSlash+1:]
 		}
+		if name == "" {
+			name = "/"
+		}
+		return &filesystem.FileInfo{
+			Name:    name,
+			Size:    0,
+			Mode:    0755,
+			ModTime: time.Now(),
+			IsDir:   true,
+			Meta: filesystem.MetaData{
+				Type: MetaValueMountPoint,
+			},
+		}, nil
 	}
 
 	return nil, filesystem.NewNotFoundError("stat", path)
 }
 
 func (mfs *MountableFS) Rename(oldPath, newPath string) error {
-	mfs.mu.RLock()
+	// findMount is now lock-free
 	oldMount, oldRelPath, oldFound := mfs.findMount(oldPath)
 	newMount, newRelPath, newFound := mfs.findMount(newPath)
-	mfs.mu.RUnlock()
 
-	// Both paths must be in the same filesystem
 	if oldFound && newFound {
 		if oldMount != newMount {
 			return fmt.Errorf("cannot rename across different mounts")
@@ -731,9 +679,7 @@ func (mfs *MountableFS) Rename(oldPath, newPath string) error {
 }
 
 func (mfs *MountableFS) Chmod(path string, mode uint32) error {
-	mfs.mu.RLock()
 	mount, relPath, found := mfs.findMount(path)
-	mfs.mu.RUnlock()
 
 	if found {
 		return mount.Plugin.GetFileSystem().Chmod(relPath, mode)
@@ -743,20 +689,15 @@ func (mfs *MountableFS) Chmod(path string, mode uint32) error {
 
 // Touch implements filesystem.Toucher interface
 func (mfs *MountableFS) Touch(path string) error {
-	mfs.mu.RLock()
 	mount, relPath, found := mfs.findMount(path)
-	mfs.mu.RUnlock()
 
 	if found {
 		fs := mount.Plugin.GetFileSystem()
-		// Check if the underlying filesystem implements Toucher
 		if toucher, ok := fs.(filesystem.Toucher); ok {
 			return toucher.Touch(relPath)
 		}
-		// Fallback: inefficient implementation - read and write back
 		info, err := fs.Stat(relPath)
 		if err == nil {
-			// File exists - read current content and write it back
 			if !info.IsDir {
 				data, readErr := fs.Read(relPath, 0, -1)
 				if readErr != nil {
@@ -767,7 +708,6 @@ func (mfs *MountableFS) Touch(path string) error {
 			}
 			return fmt.Errorf("cannot touch directory")
 		} else {
-			// File doesn't exist - create with empty content
 			_, err := fs.Write(relPath, []byte{})
 			return err
 		}
@@ -776,9 +716,7 @@ func (mfs *MountableFS) Touch(path string) error {
 }
 
 func (mfs *MountableFS) Open(path string) (io.ReadCloser, error) {
-	mfs.mu.RLock()
 	mount, relPath, found := mfs.findMount(path)
-	mfs.mu.RUnlock()
 
 	if found {
 		return mount.Plugin.GetFileSystem().Open(relPath)
@@ -787,9 +725,7 @@ func (mfs *MountableFS) Open(path string) (io.ReadCloser, error) {
 }
 
 func (mfs *MountableFS) OpenWrite(path string) (io.WriteCloser, error) {
-	mfs.mu.RLock()
 	mount, relPath, found := mfs.findMount(path)
-	mfs.mu.RUnlock()
 
 	if found {
 		return mount.Plugin.GetFileSystem().OpenWrite(relPath)
@@ -799,15 +735,12 @@ func (mfs *MountableFS) OpenWrite(path string) (io.WriteCloser, error) {
 
 // OpenStream implements filesystem.Streamer interface
 func (mfs *MountableFS) OpenStream(path string) (filesystem.StreamReader, error) {
-	mfs.mu.RLock()
 	mount, relPath, found := mfs.findMount(path)
-	mfs.mu.RUnlock()
 
 	if !found {
 		return nil, filesystem.NewNotFoundError("openstream", path)
 	}
 
-	// Check if the filesystem supports Streamer interface
 	fs := mount.Plugin.GetFileSystem()
 	if streamer, ok := fs.(filesystem.Streamer); ok {
 		log.Debugf("[mountablefs] OpenStream: found streamer for path %s (relPath: %s, fs type: %T)", path, relPath, fs)
@@ -821,15 +754,12 @@ func (mfs *MountableFS) OpenStream(path string) (filesystem.StreamReader, error)
 // GetStream tries to get a stream from the underlying filesystem if it supports streaming
 // Deprecated: Use OpenStream instead
 func (mfs *MountableFS) GetStream(path string) (interface{}, error) {
-	mfs.mu.RLock()
 	mount, relPath, found := mfs.findMount(path)
-	mfs.mu.RUnlock()
 
 	if !found {
 		return nil, filesystem.NewNotFoundError("getstream", path)
 	}
 
-	// Check if the filesystem supports GetStream method (for backward compatibility)
 	type streamGetter interface {
 		GetStream(path string) (interface{}, error)
 	}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"sync/atomic"
 	"time"
 
 	agfs "github.com/c4pt0r/agfs/agfs-sdk/go"
@@ -43,7 +44,7 @@ func convertFileInfos(src []agfs.FileInfo) []filesystem.FileInfo {
 // ProxyFS implements filesystem.FileSystem by proxying to a remote AGFS HTTP API
 // All file system operations are transparently forwarded to the remote server
 type ProxyFS struct {
-	client     *agfs.Client
+	client     atomic.Pointer[agfs.Client]
 	pluginName string
 	baseURL    string // Store base URL for reload
 }
@@ -51,40 +52,44 @@ type ProxyFS struct {
 // NewProxyFS creates a new ProxyFS that redirects to a remote AGFS server
 // baseURL should include the API version, e.g., "http://localhost:8080/api/v1"
 func NewProxyFS(baseURL string, pluginName string) *ProxyFS {
-	return &ProxyFS{
-		client:     agfs.NewClient(baseURL),
+	p := &ProxyFS{
 		pluginName: pluginName,
 		baseURL:    baseURL,
 	}
+	p.client.Store(agfs.NewClient(baseURL))
+	return p
 }
 
 // Reload recreates the HTTP client, useful for refreshing connections
 func (p *ProxyFS) Reload() error {
 	// Create a new client to refresh the connection
-	p.client = agfs.NewClient(p.baseURL)
+	newClient := agfs.NewClient(p.baseURL)
 
 	// Test the new connection
-	if err := p.client.Health(); err != nil {
+	if err := newClient.Health(); err != nil {
 		return fmt.Errorf("failed to connect after reload: %w", err)
 	}
+
+	// Atomically replace the client
+	p.client.Store(newClient)
 
 	return nil
 }
 
 func (p *ProxyFS) Create(path string) error {
-	return p.client.Create(path)
+	return p.client.Load().Create(path)
 }
 
 func (p *ProxyFS) Mkdir(path string, perm uint32) error {
-	return p.client.Mkdir(path, perm)
+	return p.client.Load().Mkdir(path, perm)
 }
 
 func (p *ProxyFS) Remove(path string) error {
-	return p.client.Remove(path)
+	return p.client.Load().Remove(path)
 }
 
 func (p *ProxyFS) RemoveAll(path string) error {
-	return p.client.RemoveAll(path)
+	return p.client.Load().RemoveAll(path)
 }
 
 func (p *ProxyFS) Read(path string, offset int64, size int64) ([]byte, error) {
@@ -93,7 +98,7 @@ func (p *ProxyFS) Read(path string, offset int64, size int64) ([]byte, error) {
 		data := []byte("Write to this file to reload the proxy connection\n")
 		return plugin.ApplyRangeRead(data, offset, size)
 	}
-	return p.client.Read(path, offset, size)
+	return p.client.Load().Read(path, offset, size)
 }
 
 func (p *ProxyFS) Write(path string, data []byte) ([]byte, error) {
@@ -104,11 +109,11 @@ func (p *ProxyFS) Write(path string, data []byte) ([]byte, error) {
 		}
 		return []byte("ProxyFS reloaded successfully"), nil
 	}
-	return p.client.Write(path, data)
+	return p.client.Load().Write(path, data)
 }
 
 func (p *ProxyFS) ReadDir(path string) ([]filesystem.FileInfo, error) {
-	sdkFiles, err := p.client.ReadDir(path)
+	sdkFiles, err := p.client.Load().ReadDir(path)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +161,7 @@ func (p *ProxyFS) Stat(path string) (*filesystem.FileInfo, error) {
 	}
 
 	// Get stat from remote
-	sdkStat, err := p.client.Stat(path)
+	sdkStat, err := p.client.Load().Stat(path)
 	if err != nil {
 		return nil, err
 	}
@@ -174,15 +179,15 @@ func (p *ProxyFS) Stat(path string) (*filesystem.FileInfo, error) {
 }
 
 func (p *ProxyFS) Rename(oldPath, newPath string) error {
-	return p.client.Rename(oldPath, newPath)
+	return p.client.Load().Rename(oldPath, newPath)
 }
 
 func (p *ProxyFS) Chmod(path string, mode uint32) error {
-	return p.client.Chmod(path, mode)
+	return p.client.Load().Chmod(path, mode)
 }
 
 func (p *ProxyFS) Open(path string) (io.ReadCloser, error) {
-	data, err := p.client.Read(path, 0, -1)
+	data, err := p.client.Load().Read(path, 0, -1)
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +201,7 @@ func (p *ProxyFS) OpenWrite(path string) (io.WriteCloser, error) {
 // OpenStream implements filesystem.Streamer interface
 func (p *ProxyFS) OpenStream(path string) (filesystem.StreamReader, error) {
 	// Use the client's ReadStream to get a streaming connection
-	streamReader, err := p.client.ReadStream(path)
+	streamReader, err := p.client.Load().ReadStream(path)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +218,7 @@ func (p *ProxyFS) OpenStream(path string) (filesystem.StreamReader, error) {
 // Deprecated: Use OpenStream instead
 func (p *ProxyFS) GetStream(path string) (interface{}, error) {
 	// Use the client's ReadStream to get a streaming connection
-	streamReader, err := p.client.ReadStream(path)
+	streamReader, err := p.client.Load().ReadStream(path)
 	if err != nil {
 		return nil, err
 	}
@@ -370,7 +375,7 @@ func (p *ProxyFSPlugin) Initialize(config map[string]interface{}) error {
 	}
 
 	// Test connection to remote server with health check
-	if err := p.fs.client.Health(); err != nil {
+	if err := p.fs.client.Load().Health(); err != nil {
 		return fmt.Errorf("failed to connect to remote AGFS server at %s: %w", p.baseURL, err)
 	}
 
@@ -441,7 +446,7 @@ STREAMING SUPPORT:
   ProxyFS transparently proxies streaming operations to remote AGFS servers.
 
   Access remote streamfs:
-    p cat --stream /proxyfs/remote/streamfs/video | ffplay -
+    p cat --stream /proxyfs/remote/streamfs/video | ffplay - 
 
   Write to remote streamfs:
     cat file.mp4 | p write --stream /proxyfs/remote/streamfs/video
