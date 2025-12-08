@@ -520,6 +520,11 @@ func NewStreamRotateFS(channelBuffer int, ringSize int, rotationCfg RotationConf
 }
 
 func (srf *StreamRotateFS) Create(path string) error {
+	// Prevent creating a stream named README (reserved for documentation)
+	if path == "/README" {
+		return fmt.Errorf("cannot create stream named README: reserved for documentation")
+	}
+
 	srf.mu.Lock()
 	defer srf.mu.Unlock()
 
@@ -563,6 +568,11 @@ func (srf *StreamRotateFS) Read(path string, offset int64, size int64) ([]byte, 
 }
 
 func (srf *StreamRotateFS) Write(path string, data []byte) ([]byte, error) {
+	// Prevent writing to README (reserved for documentation)
+	if path == "/README" {
+		return nil, fmt.Errorf("cannot write to README: reserved for documentation, use regular read mode")
+	}
+
 	srf.mu.Lock()
 	stream, exists := srf.streams[path]
 	if !exists {
@@ -600,7 +610,11 @@ func (srf *StreamRotateFS) ReadDir(path string) ([]filesystem.FileInfo, error) {
 	}
 
 	files := []filesystem.FileInfo{readme}
-	for _, stream := range srf.streams {
+	for path, stream := range srf.streams {
+		// Skip README stream if it somehow exists (shouldn't happen with Create check)
+		if path == "/README" {
+			continue
+		}
 		files = append(files, stream.GetInfo())
 	}
 
