@@ -169,7 +169,13 @@ def main():
     parser.add_argument('script', nargs='?', help='Script file to execute')
     parser.add_argument('args', nargs='*', help='Arguments to script (or command if no script)')
 
-    args = parser.parse_args()
+    # Use parse_known_args to allow command-specific flags to pass through
+    args, unknown = parser.parse_known_args()
+
+    # Merge unknown args with args - they should all be part of the command
+    if unknown:
+        # Insert unknown args at the beginning since they came before positional args
+        args.args = unknown + args.args
 
     # Show help if requested
     if args.help:
