@@ -138,6 +138,15 @@ func (mfs *MountableFS) Mount(path string, plugin plugin.ServicePlugin) error {
 		return filesystem.NewAlreadyExistsError("mount", path)
 	}
 
+	// Special handling for plugins that need parent filesystem reference
+	type parentFSSetter interface {
+		SetParentFileSystem(filesystem.FileSystem)
+	}
+	if setter, ok := plugin.(parentFSSetter); ok {
+		setter.SetParentFileSystem(mfs)
+		log.Debugf("Set parentFS for plugin at %s", path)
+	}
+
 	// Create new tree with added mount
 	newTree, _, _ := tree.Insert([]byte(path), &MountPoint{
 		Path:   path,
@@ -183,6 +192,15 @@ func (mfs *MountableFS) MountPlugin(fstype string, path string, config map[strin
 	if setter, ok := pluginInstance.(rootFSSetter); ok {
 		setter.SetRootFS(mfs)
 		log.Debugf("Set rootFS for plugin %s at %s", fstype, path)
+	}
+
+	// Special handling for plugins that need parent filesystem reference
+	type parentFSSetter interface {
+		SetParentFileSystem(filesystem.FileSystem)
+	}
+	if setter, ok := pluginInstance.(parentFSSetter); ok {
+		setter.SetParentFileSystem(mfs)
+		log.Debugf("Set parentFS for plugin %s at %s", fstype, path)
 	}
 
 	// Inject mount_path into config

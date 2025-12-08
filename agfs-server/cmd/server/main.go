@@ -26,6 +26,7 @@ import (
 	"github.com/c4pt0r/agfs/agfs-server/pkg/plugins/sqlfs"
 	"github.com/c4pt0r/agfs/agfs-server/pkg/plugins/sqlfs2"
 	"github.com/c4pt0r/agfs/agfs-server/pkg/plugins/streamfs"
+	"github.com/c4pt0r/agfs/agfs-server/pkg/plugins/streamrotatefs"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -50,10 +51,11 @@ var availablePlugins = map[string]PluginFactory{
 	"httpfs":       func() plugin.ServicePlugin { return httpfs.NewHTTPFSPlugin() },
 	"proxyfs":      func() plugin.ServicePlugin { return proxyfs.NewProxyFSPlugin("") },
 	"s3fs":         func() plugin.ServicePlugin { return s3fs.NewS3FSPlugin() },
-	"streamfs":     func() plugin.ServicePlugin { return streamfs.NewStreamFSPlugin() },
-	"sqlfs":        func() plugin.ServicePlugin { return sqlfs.NewSQLFSPlugin() },
-	"sqlfs2":       func() plugin.ServicePlugin { return sqlfs2.NewSQLFS2Plugin() },
-	"localfs":      func() plugin.ServicePlugin { return localfs.NewLocalFSPlugin() },
+	"streamfs":       func() plugin.ServicePlugin { return streamfs.NewStreamFSPlugin() },
+	"streamrotatefs": func() plugin.ServicePlugin { return streamrotatefs.NewStreamRotateFSPlugin() },
+	"sqlfs":          func() plugin.ServicePlugin { return sqlfs.NewSQLFSPlugin() },
+	"sqlfs2":         func() plugin.ServicePlugin { return sqlfs2.NewSQLFS2Plugin() },
+	"localfs":        func() plugin.ServicePlugin { return localfs.NewLocalFSPlugin() },
 }
 
 const sampleConfig = `# AGFS Server Configuration File

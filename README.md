@@ -1,4 +1,4 @@
-AGFS
+# <img src="./assets/logo.png" alt="AGFS Logo" height="40" style="vertical-align: middle;"/> AGFS
 ---
 
 Aggregated File System (or Agent FS), originally known as pfs (Plugin File System)
