@@ -18,6 +18,7 @@ An experimental shell implementation with Unix-style pipeline support and **AGFS
   - [Command Substitution](#command-substitution)
   - [Glob Patterns](#glob-patterns)
   - [Control Flow](#control-flow)
+  - [Functions](#functions)
   - [Heredoc](#heredoc)
 - [Built-in Commands](#built-in-commands)
   - [File System Commands](#file-system-commands)
@@ -41,6 +42,7 @@ agfs-shell is a lightweight, educational shell that demonstrates Unix pipeline c
 **Key Features:**
 - Unix-style pipelines and redirection
 - Full scripting support with control flow
+- User-defined functions with local variables
 - AGFS integration for distributed file operations
 - Tab completion and command history
 - AI-powered command (llm integration)
@@ -57,15 +59,16 @@ agfs-shell is a lightweight, educational shell that demonstrates Unix pipeline c
 - **Command Substitution**: `$(command)` or backticks
 - **Glob Expansion**: `*.txt`, `file?.dat`, `[abc]`
 - **Control Flow**: `if/then/elif/else/fi` and `for/in/do/done`
+- **Functions**: User-defined functions with parameters and local variables
 - **Comments**: `#` and `//` style comments
 
-### Built-in Commands (37+)
+### Built-in Commands (39+)
 - **File Operations**: cd, pwd, ls, tree, cat, mkdir, touch, rm, mv, stat, cp, upload, download
 - **Text Processing**: echo, grep, jq, wc, head, tail, sort, uniq, tr, rev, cut
 - **Path Utilities**: basename, dirname
-- **Variables**: export, env, unset
+- **Variables**: export, env, unset, local
 - **Testing**: test, [ ]
-- **Control Flow**: break, continue, exit
+- **Control Flow**: break, continue, exit, return
 - **Utilities**: sleep, date, plugins, mount, help
 - **AI**: llm (LLM integration)
 
@@ -361,6 +364,127 @@ for i in 1 2 3 4 5; do
     echo $i
 done
 # Output: 1, 2, 4, 5
+```
+
+### Functions
+
+**Function Definition:**
+
+```bash
+# Syntax 1: function_name() { ... }
+greet() {
+    echo "Hello, $1!"
+}
+
+# Syntax 2: function keyword
+function greet {
+    echo "Hello, $1!"
+}
+
+# Single-line syntax
+greet() { echo "Hello, $1!"; }
+```
+
+**Function Calls:**
+
+```bash
+# Call with arguments
+greet Alice           # $1 = Alice
+greet Bob Charlie     # $1 = Bob, $2 = Charlie
+
+# Use in command substitution
+result=$(add 5 3)
+echo "Result: $result"
+```
+
+**Local Variables:**
+
+```bash
+counter() {
+    local count=0          # Declare local variable
+    count=$((count + 1))
+    echo $count
+}
+
+# Local variables don't affect global scope
+x=100
+test_scope() {
+    local x=10
+    echo "Inside: $x"     # Prints: Inside: 10
+}
+test_scope
+echo "Outside: $x"        # Prints: Outside: 100
+```
+
+**Return Values:**
+
+```bash
+is_positive() {
+    if [ $1 -gt 0 ]; then
+        return 0          # Success
+    else
+        return 1          # Failure
+    fi
+}
+
+is_positive 5
+echo "Exit code: $?"      # Prints: Exit code: 0
+```
+
+**Positional Parameters:**
+
+```bash
+show_args() {
+    echo "Function: $0"   # Function name
+    echo "Arg count: $#"  # Number of arguments
+    echo "All args: $@"   # All arguments
+    echo "First: $1"      # First argument
+    echo "Second: $2"     # Second argument
+}
+
+show_args apple banana cherry
+```
+
+**Advanced Examples:**
+
+```bash
+# Recursive function
+factorial() {
+    local n=$1
+    if [ $n -le 1 ]; then
+        echo 1
+    else
+        local prev=$(factorial $((n - 1)))
+        echo $((n * prev))
+    fi
+}
+
+result=$(factorial 5)
+echo "5! = $result"       # Prints: 5! = 120
+
+# Function composition
+add() { echo $((${1} + ${2})); }
+multiply() { echo $((${1} * ${2})); }
+
+compute() {
+    local sum=$(add $1 $2)
+    local product=$(multiply $sum $3)
+    echo $product
+}
+
+compute 5 3 4             # (5 + 3) * 4 = 32
+
+# Functions with loops
+process_files() {
+    for file in $@; do
+        if [ -f $file ]; then
+            echo "Processing: $file"
+            cat $file | wc -l
+        fi
+    done
+}
+
+process_files /local/*.txt
 ```
 
 ### Heredoc
@@ -796,6 +920,39 @@ exit $?         # Exit with last command's exit code
 if [ ! -f /local/required.txt ]; then
     echo "Error: Required file not found"
     exit 1
+fi
+```
+
+#### local VAR=value
+Declare local variables (only valid within functions).
+
+```bash
+myfunction() {
+    local counter=0        # Local to this function
+    local name=$1          # Local copy of first argument
+    counter=$((counter + 1))
+    echo "Counter: $counter"
+}
+
+myfunction test           # Prints: Counter: 1
+# 'counter' variable doesn't exist outside the function
+```
+
+#### return [n]
+Return from a function with an optional exit status.
+
+```bash
+is_valid() {
+    if [ $1 -gt 0 ]; then
+        return 0          # Success
+    else
+        return 1          # Failure
+    fi
+}
+
+is_valid 5
+if [ $? -eq 0 ]; then
+    echo "Valid number"
 fi
 ```
 
@@ -1428,8 +1585,9 @@ agfs-shell/
 - Control flow (`if/then/else/fi`, `for/do/done`)
 - Conditional testing (`test`, `[ ]`)
 - Loop control (`break`, `continue`)
+- User-defined functions with local variables
 - Tab completion and history
-- 37+ built-in commands
+- 39+ built-in commands
 - Script execution (`.as` files)
 - AI integration (`llm` command)
 
@@ -1448,6 +1606,10 @@ uv run pytest tests/test_builtins.py -v
 ./test_simple_for.agfsh
 ./test_for.agfsh
 ./test_for_with_comment.agfsh
+
+# Run function tests
+./test_functions.as           # Basic function tests
+./test_functions_advanced.as  # Advanced function tests
 ```
 
 ### Manual Testing
@@ -1474,6 +1636,15 @@ agfs:/> for i in 1 2 3; do echo $i; done
 # Test file operations
 agfs:/> echo "test" > /local/test.txt
 agfs:/> cat /local/test.txt
+
+# Test functions
+agfs:/> add() { echo $((${1} + ${2})); }
+agfs:/> add 5 3
+8
+
+agfs:/> greet() { echo "Hello, $1!"; }
+agfs:/> greet Alice
+Hello, Alice!
 ```
 
 ## Configuration

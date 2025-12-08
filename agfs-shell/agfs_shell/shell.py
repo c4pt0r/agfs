@@ -18,7 +18,9 @@ from .exit_codes import (
     EXIT_CODE_BREAK,
     EXIT_CODE_FOR_LOOP_NEEDED,
     EXIT_CODE_IF_STATEMENT_NEEDED,
-    EXIT_CODE_HEREDOC_NEEDED
+    EXIT_CODE_HEREDOC_NEEDED,
+    EXIT_CODE_FUNCTION_DEF_NEEDED,
+    EXIT_CODE_RETURN
 )
 
 
@@ -42,6 +44,13 @@ class Shell:
         self.env['HISTFILE'] = os.path.join(home, ".agfs_shell_history")
 
         self.interactive = False  # Flag to indicate if running in interactive REPL mode
+
+        # Function definitions: {name: {'params': [...], 'body': [...]}}
+        self.functions = {}
+
+        # Variable scope stack for local variables
+        # Each entry is a dict of local variables for that scope
+        self.local_scopes = []
 
     def _execute_command_substitution(self, command: str) -> str:
         """
@@ -155,6 +164,46 @@ class Shell:
         # Strip # comments using lexer (also respects quotes)
         return strip_comments(line, comment_chars='#')
 
+    def _get_variable(self, var_name: str) -> str:
+        """
+        Get variable value, checking local scopes first, then global env
+
+        Args:
+            var_name: Variable name
+
+        Returns:
+            Variable value or empty string if not found
+        """
+        # Check if we're in a function and have a local variable
+        if self.env.get('_function_depth'):
+            local_key = f'_local_{var_name}'
+            if local_key in self.env:
+                return self.env[local_key]
+
+        # Check local scopes from innermost to outermost
+        for scope in reversed(self.local_scopes):
+            if var_name in scope:
+                return scope[var_name]
+
+        # Fall back to global env
+        return self.env.get(var_name, '')
+
+    def _set_variable(self, var_name: str, value: str, local: bool = False):
+        """
+        Set variable value
+
+        Args:
+            var_name: Variable name
+            value: Variable value
+            local: If True, set in current local scope; otherwise set in global env
+        """
+        if local and self.local_scopes:
+            # Set in current local scope
+            self.local_scopes[-1][var_name] = value
+        else:
+            # Set in global env
+            self.env[var_name] = value
+
     def _expand_basic_variables(self, text: str) -> str:
         """
         Core variable expansion logic (shared by all expansion methods)
@@ -178,29 +227,29 @@ class Shell:
         import re
 
         # First, expand special variables (in specific order to avoid conflicts)
-        text = text.replace('$?', self.env.get('?', '0'))
-        text = text.replace('$#', self.env.get('#', '0'))
-        text = text.replace('$@', self.env.get('@', ''))
-        text = text.replace('$0', self.env.get('0', ''))
+        text = text.replace('$?', self._get_variable('?'))
+        text = text.replace('$#', self._get_variable('#'))
+        text = text.replace('$@', self._get_variable('@'))
+        text = text.replace('$0', self._get_variable('0'))
 
         # Expand ${VAR}
         def replace_braced(match):
             var_name = match.group(1)
-            return self.env.get(var_name, '')
+            return self._get_variable(var_name)
 
         text = re.sub(r'\$\{([A-Za-z_][A-Za-z0-9_]*|\d+)\}', replace_braced, text)
 
         # Expand $1, $2, etc.
         def replace_positional(match):
             var_name = match.group(1)
-            return self.env.get(var_name, '')
+            return self._get_variable(var_name)
 
         text = re.sub(r'\$(\d+)', replace_positional, text)
 
         # Expand $VAR
         def replace_simple(match):
             var_name = match.group(1)
-            return self.env.get(var_name, '')
+            return self._get_variable(var_name)
 
         text = re.sub(r'\$([A-Za-z_][A-Za-z0-9_]*)', replace_simple, text)
 
@@ -1037,6 +1086,192 @@ class Shell:
 
         return result
 
+    def _parse_function_definition(self, lines: List[str]) -> Optional[dict]:
+        """
+        Parse a function definition from a list of lines
+
+        Syntax:
+            function_name() {
+                commands
+            }
+
+        Or:
+            function function_name {
+                commands
+            }
+
+        Or single-line:
+            function_name() { commands; }
+
+        Returns:
+            Dict with structure: {
+                'name': function_name,
+                'body': [list of commands]
+            }
+        """
+        result = {
+            'name': None,
+            'body': []
+        }
+
+        if not lines:
+            return None
+
+        first_line = lines[0].strip()
+
+        # Check for single-line function: function_name() { commands... }
+        import re
+        single_line_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{(.+)\}', first_line)
+        if not single_line_match:
+            single_line_match = re.match(r'^function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{(.+)\}', first_line)
+
+        if single_line_match:
+            # Single-line function
+            result['name'] = single_line_match.group(1)
+            body = single_line_match.group(2).strip()
+            # Split by semicolons to get individual commands
+            if ';' in body:
+                result['body'] = [cmd.strip() for cmd in body.split(';') if cmd.strip()]
+            else:
+                result['body'] = [body]
+            return result
+
+        # Check for multi-line function_name() { syntax
+        match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{?\s*$', first_line)
+        if not match:
+            # Check for function function_name { syntax
+            match = re.match(r'^function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{?\s*$', first_line)
+
+        if not match:
+            return None
+
+        result['name'] = match.group(1)
+
+        # Collect function body
+        # If first line ends with {, start from next line
+        # Otherwise, expect { on next line
+        start_index = 1
+        if not first_line.endswith('{'):
+            # Look for opening brace
+            if start_index < len(lines) and lines[start_index].strip() == '{':
+                start_index += 1
+
+        # Collect lines until closing }
+        brace_depth = 1
+        for i in range(start_index, len(lines)):
+            line = lines[i].strip()
+
+            # Skip comments and empty lines
+            if not line or line.startswith('#'):
+                continue
+
+            # Check for closing brace
+            if line == '}':
+                brace_depth -= 1
+                if brace_depth == 0:
+                    break
+            elif '{' in line:
+                # Track nested braces
+                brace_depth += line.count('{')
+                brace_depth -= line.count('}')
+
+            result['body'].append(lines[i])
+
+        return result
+
+    def execute_function(self, func_name: str, args: List[str]) -> int:
+        """
+        Execute a user-defined function
+
+        Args:
+            func_name: Function name
+            args: Function arguments
+
+        Returns:
+            Exit code of function execution
+        """
+        if func_name not in self.functions:
+            return 127  # Command not found
+
+        func_def = self.functions[func_name]
+
+        # Save current positional parameters
+        saved_params = {}
+        for key in list(self.env.keys()):
+            if key.isdigit() or key in ('#', '@', '0'):
+                saved_params[key] = self.env[key]
+
+        # Track function depth for local command
+        current_depth = int(self.env.get('_function_depth', '0'))
+        self.env['_function_depth'] = str(current_depth + 1)
+
+        # Save local variables that will be shadowed
+        saved_locals = {}
+        for key in list(self.env.keys()):
+            if key.startswith('_local_'):
+                saved_locals[key] = self.env[key]
+
+        # Set new positional parameters
+        self.env['0'] = func_name
+        self.env['#'] = str(len(args))
+        self.env['@'] = ' '.join(args)
+        for i, arg in enumerate(args, 1):
+            self.env[str(i)] = arg
+
+        # Create new local scope
+        self.local_scopes.append({})
+
+        # Execute function body
+        last_exit_code = 0
+        try:
+            for cmd in func_def['body']:
+                last_exit_code = self.execute(cmd)
+
+                # Check for return
+                if last_exit_code == EXIT_CODE_RETURN:
+                    # Get the return value from special variable
+                    last_exit_code = int(self._get_variable('_return_value') or '0')
+                    break
+
+                # Break and continue should not escape function scope
+                if last_exit_code in [EXIT_CODE_BREAK, EXIT_CODE_CONTINUE]:
+                    self.console.print(f"[red]{func_name}: break/continue outside loop[/red]", highlight=False)
+                    last_exit_code = 1
+                    break
+
+        finally:
+            # Remove local scope
+            if self.local_scopes:
+                self.local_scopes.pop()
+
+            # Clear local variables from this function
+            for key in list(self.env.keys()):
+                if key.startswith('_local_'):
+                    del self.env[key]
+
+            # Restore saved local variables
+            for key, value in saved_locals.items():
+                self.env[key] = value
+
+            # Restore function depth
+            self.env['_function_depth'] = str(current_depth)
+            if current_depth == 0:
+                # Clean up if we're exiting the outermost function
+                if '_function_depth' in self.env:
+                    del self.env['_function_depth']
+
+            # Restore positional parameters
+            # First, clear current positional params
+            for key in list(self.env.keys()):
+                if key.isdigit() or key in ('#', '@', '0'):
+                    del self.env[key]
+
+            # Then restore saved params
+            for key, value in saved_params.items():
+                self.env[key] = value
+
+        return last_exit_code
+
     def execute(self, command_line: str, stdin_data: Optional[bytes] = None, heredoc_data: Optional[bytes] = None) -> int:
         """
         Execute a command line (possibly with pipelines and redirections)
@@ -1055,6 +1290,38 @@ class Shell:
         # If command is empty after stripping comments, return success
         if not command_line.strip():
             return 0
+
+        # Check for function definition
+        import re
+        # Match both function_name() { ... } and function function_name { ... }
+        func_def_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{', command_line.strip())
+        if not func_def_match:
+            func_def_match = re.match(r'^function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{', command_line.strip())
+
+        if func_def_match:
+            # Check if it's a complete single-line function
+            if '}' in command_line:
+                # Single-line function definition
+                lines = [command_line]
+                func_def = self._parse_function_definition(lines)
+                if func_def and func_def['name']:
+                    self.functions[func_def['name']] = func_def
+                    return 0
+                else:
+                    self.console.print("[red]Syntax error: invalid function definition[/red]", highlight=False)
+                    return 1
+            else:
+                # Multi-line function - signal to REPL to collect more lines
+                return EXIT_CODE_FUNCTION_DEF_NEEDED
+
+        # Also check for function definition without opening brace on first line
+        func_def_match2 = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*$', command_line.strip())
+        if not func_def_match2:
+            func_def_match2 = re.match(r'^function\s+([A-Za-z_][A-Za-z0-9_]*)\s*$', command_line.strip())
+
+        if func_def_match2:
+            # Function definition without opening brace - signal to collect more lines
+            return EXIT_CODE_FUNCTION_DEF_NEEDED
 
         # Check for for loop (special handling required)
         if command_line.strip().startswith('for '):
@@ -1105,7 +1372,7 @@ class Shell:
 
                     # Expand variables after removing quotes
                     var_value = self._expand_variables(var_value)
-                    self.env[var_name] = var_value
+                    self._set_variable(var_name, var_value)
                     return 0
 
         # Expand variables in command line
@@ -1129,6 +1396,13 @@ class Shell:
 
         if not commands:
             return 0
+
+        # Check if this is a user-defined function call (must be single command, not in pipeline)
+        if len(commands) == 1:
+            cmd_name, cmd_args = commands[0]
+            if cmd_name in self.functions:
+                # Execute user-defined function
+                return self.execute_function(cmd_name, cmd_args)
 
         # Special handling for cd command (must be a single command, not in pipeline)
         # Using metadata instead of hardcoded check
@@ -1587,6 +1861,41 @@ class Shell:
                         # Update $? with the exit code
                         self.env['?'] = str(exit_code)
 
+                    # Check if function definition is needed
+                    elif exit_code == EXIT_CODE_FUNCTION_DEF_NEEDED:
+                        # Collect function definition
+                        func_lines = [command]
+                        brace_depth = 1  # We've seen the opening {
+                        try:
+                            while True:
+                                func_line = input("> ")
+                                func_lines.append(func_line)
+                                # Track braces
+                                stripped = func_line.strip()
+                                brace_depth += stripped.count('{')
+                                brace_depth -= stripped.count('}')
+                                if brace_depth == 0:
+                                    break
+                        except EOFError:
+                            # Ctrl+D before closing }
+                            self.console.print("\nWarning: function definition ended by end-of-file (wanted `}`)", highlight=False)
+                        except KeyboardInterrupt:
+                            # Ctrl+C during function definition - cancel
+                            self.console.print("\n^C", highlight=False)
+                            continue
+
+                        # Parse and store the function
+                        func_def = self._parse_function_definition(func_lines)
+                        if func_def and func_def['name']:
+                            self.functions[func_def['name']] = func_def
+                            exit_code = 0
+                        else:
+                            self.console.print("[red]Syntax error: invalid function definition[/red]", highlight=False)
+                            exit_code = 1
+
+                        # Update $? with the exit code
+                        self.env['?'] = str(exit_code)
+
                     # Check if heredoc is needed
                     elif exit_code == EXIT_CODE_HEREDOC_NEEDED:
                         # Parse command to get heredoc delimiter
@@ -1627,7 +1936,9 @@ class Shell:
                             EXIT_CODE_BREAK,
                             EXIT_CODE_FOR_LOOP_NEEDED,
                             EXIT_CODE_IF_STATEMENT_NEEDED,
-                            EXIT_CODE_HEREDOC_NEEDED
+                            EXIT_CODE_HEREDOC_NEEDED,
+                            EXIT_CODE_FUNCTION_DEF_NEEDED,
+                            EXIT_CODE_RETURN
                         ]:
                             self.env['?'] = str(exit_code)
 

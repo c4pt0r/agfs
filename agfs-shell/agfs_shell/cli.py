@@ -10,7 +10,8 @@ from .exit_codes import (
     EXIT_CODE_BREAK,
     EXIT_CODE_FOR_LOOP_NEEDED,
     EXIT_CODE_IF_STATEMENT_NEEDED,
-    EXIT_CODE_HEREDOC_NEEDED
+    EXIT_CODE_HEREDOC_NEEDED,
+    EXIT_CODE_FUNCTION_DEF_NEEDED
 )
 
 
@@ -82,6 +83,31 @@ def execute_script_file(shell, script_path, script_args=None):
                     # Reset control flow codes to 0 for script execution
                     if exit_code in [EXIT_CODE_CONTINUE, EXIT_CODE_BREAK]:
                         exit_code = 0
+                # Check if function definition needs to be collected
+                elif exit_code == EXIT_CODE_FUNCTION_DEF_NEEDED:
+                    # Collect function definition
+                    func_lines = [line]
+                    brace_depth = 1  # We've seen the opening {
+                    i += 1
+                    while i < len(lines):
+                        next_line = lines[i].strip()
+                        func_lines.append(next_line)
+                        # Track braces
+                        brace_depth += next_line.count('{')
+                        brace_depth -= next_line.count('}')
+                        if brace_depth == 0:
+                            break
+                        i += 1
+
+                    # Parse and store the function
+                    func_def = shell._parse_function_definition(func_lines)
+                    if func_def and func_def['name']:
+                        shell.functions[func_def['name']] = func_def
+                        exit_code = 0
+                    else:
+                        sys.stderr.write(f"Error at line {line_num}: invalid function definition\n")
+                        return 1
+
                 # Check if if-statement needs to be collected
                 elif exit_code == EXIT_CODE_IF_STATEMENT_NEEDED:
                     # Collect if/then/else/fi statement with depth tracking
@@ -231,7 +257,8 @@ def main():
                 if not part:
                     continue
 
-                # Check if this part starts a control flow statement
+                # Check if this part starts a control flow statement or function
+                import re
                 if part.startswith('if '):
                     in_control_flow = True
                     control_flow_type = 'if'
@@ -240,12 +267,17 @@ def main():
                     in_control_flow = True
                     control_flow_type = 'for'
                     current_cmd.append(part)
+                elif re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)', part) or part.startswith('function '):
+                    in_control_flow = True
+                    control_flow_type = 'function'
+                    current_cmd.append(part)
                 # Check if we're in a control flow statement
                 elif in_control_flow:
                     current_cmd.append(part)
                     # Check if this part ends the control flow statement
                     if (control_flow_type == 'if' and 'fi' in part) or \
-                       (control_flow_type == 'for' and 'done' in part):
+                       (control_flow_type == 'for' and 'done' in part) or \
+                       (control_flow_type == 'function' and '}' in part):
                         # Complete control flow statement
                         commands.append('; '.join(current_cmd))
                         current_cmd = []
@@ -270,7 +302,8 @@ def main():
                 if exit_code != 0 and exit_code not in [
                     EXIT_CODE_FOR_LOOP_NEEDED,
                     EXIT_CODE_IF_STATEMENT_NEEDED,
-                    EXIT_CODE_HEREDOC_NEEDED
+                    EXIT_CODE_HEREDOC_NEEDED,
+                    EXIT_CODE_FUNCTION_DEF_NEEDED
                 ]:
                     # Stop on error (unless it's a special code)
                     break
