@@ -1190,7 +1190,7 @@ cat /local/error.log | llm "Analyze these errors and suggest fixes"
 - `-c CONFIG` - Config file path
 
 **Configuration:**
-Create `/etc/llm.yaml` or `~/.llm.yaml`:
+Create `/etc/llm.yaml` (in agfs)
 
 ```yaml
 models:
