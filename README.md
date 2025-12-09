@@ -1,5 +1,8 @@
 # <img src="./assets/logo-white.png" alt="AGFS Logo" height="40" style="vertical-align: middle;"/>
 
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Daily Build](https://github.com/c4pt0r/agfs/actions/workflows/daily-build.yml/badge.svg)](https://github.com/c4pt0r/agfs/actions/workflows/daily-build.yml)
+
 Aggregated File System (or Agent FS), originally known as pfs (Plugin File System)
 
 "Everything is a file."
