@@ -20,22 +20,22 @@ The easiest way to get started is using Docker:
 
 1.  **Pull the image**:
     ```bash
-    docker pull agfs/agfs-server:latest
+    docker pull c4pt0r/agfs-server:latest
     ```
 
 2.  **Run the server with port mapping**:
     ```bash
     # Basic run - expose port 8080 to host
-    docker run -d -p 8080:8080 --name agfs-server agfs/agfs-server:latest
+    docker run -d -p 8080:8080 --name agfs-server c4pt0r/agfs-server:latest
 
     # With custom port mapping (host:container)
-    docker run -d -p 9000:8080 --name agfs-server agfs/agfs-server:latest
+    docker run -d -p 9000:8080 --name agfs-server c4pt0r/agfs-server:latest
 
     # With data persistence (mount /data directory)
-    docker run -d -p 8080:8080 -v $(pwd)/data:/data --name agfs-server agfs/agfs-server:latest
+    docker run -d -p 8080:8080 -v $(pwd)/data:/data --name agfs-server c4pt0r/agfs-server:latest
 
     # With custom configuration
-    docker run -d -p 8080:8080 -v $(pwd)/config.yaml:/config.yaml --name agfs-server agfs/agfs-server:latest
+    docker run -d -p 8080:8080 -v $(pwd)/config.yaml:/config.yaml --name agfs-server c4pt0r/agfs-server:latest
     ```
 
 3.  **Using agfs-shell inside the container**:
