@@ -23,6 +23,7 @@ def cmd_mount(process: Process) -> int:
         mount memfs /test/mem
         mount sqlfs /test/db backend=sqlite db_path=/tmp/test.db
         mount s3fs /test/s3 bucket=my-bucket region=us-west-1 access_key_id=xxx secret_access_key=yyy
+        mount proxyfs /remote "base_url=http://workstation:8080/api/v1"  # Quote URLs with colons
     """
     if not process.filesystem:
         process.stderr.write("mount: filesystem not available\n")
@@ -77,6 +78,7 @@ def cmd_mount(process: Process) -> int:
         process.stderr.write("  mount memfs /test/mem\n")
         process.stderr.write("  mount sqlfs /test/db backend=sqlite db_path=/tmp/test.db\n")
         process.stderr.write("  mount s3fs /test/s3 bucket=my-bucket region=us-west-1\n")
+        process.stderr.write('  mount proxyfs /remote "base_url=http://workstation:8080/api/v1"  # Quote URLs\n')
         return 1
 
     fstype = process.args[0]

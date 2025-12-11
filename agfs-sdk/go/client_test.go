@@ -116,3 +116,56 @@ func TestClient_ErrorHandling(t *testing.T) {
 		t.Error("expected error, got nil")
 	}
 }
+
+func TestNormalizeBaseURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "full URL with /api/v1",
+			input:    "http://localhost:8080/api/v1",
+			expected: "http://localhost:8080/api/v1",
+		},
+		{
+			name:     "URL without /api/v1",
+			input:    "http://localhost:8080",
+			expected: "http://localhost:8080/api/v1",
+		},
+		{
+			name:     "URL with trailing slash",
+			input:    "http://localhost:8080/",
+			expected: "http://localhost:8080/api/v1",
+		},
+		{
+			name:     "URL with /api/v1 and trailing slash",
+			input:    "http://localhost:8080/api/v1/",
+			expected: "http://localhost:8080/api/v1",
+		},
+		{
+			name:     "malformed URL - just protocol",
+			input:    "http:",
+			expected: "http:", // Don't try to fix it, return as-is
+		},
+		{
+			name:     "hostname with port",
+			input:    "http://workstation:8080/api/v1",
+			expected: "http://workstation:8080/api/v1",
+		},
+		{
+			name:     "hostname with port no api path",
+			input:    "http://workstation:8080",
+			expected: "http://workstation:8080/api/v1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := normalizeBaseURL(tt.input)
+			if result != tt.expected {
+				t.Errorf("normalizeBaseURL(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}

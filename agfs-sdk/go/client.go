@@ -44,6 +44,16 @@ func normalizeBaseURL(baseURL string) string {
 	if len(baseURL) > 0 && baseURL[len(baseURL)-1] == '/' {
 		baseURL = baseURL[:len(baseURL)-1]
 	}
+
+	// Validate that we have a proper URL with a host
+	// A valid URL should at least have "protocol://host" format
+	// Check for "://" to ensure we have both protocol and host
+	if !strings.Contains(baseURL, "://") {
+		// If there's no "://", this is likely a malformed URL
+		// Don't try to fix it, just return as-is and let HTTP client fail with proper error
+		return baseURL
+	}
+
 	// Auto-append /api/v1 if not present
 	if len(baseURL) < 7 || baseURL[len(baseURL)-7:] != "/api/v1" {
 		baseURL = baseURL + "/api/v1"

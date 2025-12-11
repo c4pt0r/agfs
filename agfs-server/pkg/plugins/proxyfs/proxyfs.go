@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -379,6 +380,17 @@ func (p *ProxyFSPlugin) Initialize(config map[string]interface{}) error {
 			p.baseURL = url
 			p.fs = NewProxyFS(url, PluginName)
 		}
+	}
+
+	// Validate that we have a base URL
+	if p.baseURL == "" {
+		return fmt.Errorf("base_url is required in configuration")
+	}
+
+	// Validate that the base URL is properly formatted
+	// Check for protocol separator to catch common mistakes like "http:" instead of "http://host"
+	if !strings.Contains(p.baseURL, "://") {
+		return fmt.Errorf("invalid base_url format: %s (expected format: http://hostname:port or http://hostname:port/api/v1). Did you forget to quote the URL?", p.baseURL)
 	}
 
 	// Test connection to remote server with health check
