@@ -156,7 +156,7 @@ impl<T: ReadOnlyFileSystem> FileSystem for T {
 /// file position and state across multiple read/write operations
 pub trait FileHandle {
     /// Returns the unique identifier of this handle
-    fn id(&self) -> &str;
+    fn id(&self) -> i64;
 
     /// Returns the file path this handle is associated with
     fn path(&self) -> &str;
@@ -197,33 +197,33 @@ pub trait HandleFS: FileSystem {
     /// Opens a file and returns the handle ID for stateful operations
     /// flags: OpenFlag bits (O_RDONLY, O_WRONLY, O_RDWR, O_APPEND, O_CREATE, O_EXCL, O_TRUNC)
     /// mode: file permission mode (used when creating new files)
-    /// Returns the handle ID string
-    fn open_handle(&mut self, path: &str, flags: OpenFlag, mode: u32) -> Result<String>;
+    /// Returns the handle ID as i64
+    fn open_handle(&mut self, path: &str, flags: OpenFlag, mode: u32) -> Result<i64>;
 
     /// Read from handle at current position, returns bytes read
-    fn handle_read(&mut self, id: &str, buf: &mut [u8]) -> Result<usize>;
+    fn handle_read(&mut self, id: i64, buf: &mut [u8]) -> Result<usize>;
 
     /// Read from handle at specified offset (pread)
-    fn handle_read_at(&self, id: &str, buf: &mut [u8], offset: i64) -> Result<usize>;
+    fn handle_read_at(&self, id: i64, buf: &mut [u8], offset: i64) -> Result<usize>;
 
     /// Write to handle at current position, returns bytes written
-    fn handle_write(&mut self, id: &str, data: &[u8]) -> Result<usize>;
+    fn handle_write(&mut self, id: i64, data: &[u8]) -> Result<usize>;
 
     /// Write to handle at specified offset (pwrite)
-    fn handle_write_at(&self, id: &str, data: &[u8], offset: i64) -> Result<usize>;
+    fn handle_write_at(&self, id: i64, data: &[u8], offset: i64) -> Result<usize>;
 
     /// Seek handle position
-    fn handle_seek(&mut self, id: &str, offset: i64, whence: i32) -> Result<i64>;
+    fn handle_seek(&mut self, id: i64, offset: i64, whence: i32) -> Result<i64>;
 
     /// Sync handle data
-    fn handle_sync(&self, id: &str) -> Result<()>;
+    fn handle_sync(&self, id: i64) -> Result<()>;
 
     /// Stat via handle
-    fn handle_stat(&self, id: &str) -> Result<FileInfo>;
+    fn handle_stat(&self, id: i64) -> Result<FileInfo>;
 
     /// Get handle info (path, flags)
-    fn handle_info(&self, id: &str) -> Result<(String, OpenFlag)>;
+    fn handle_info(&self, id: i64) -> Result<(String, OpenFlag)>;
 
     /// Closes a handle by its ID
-    fn close_handle(&mut self, id: &str) -> Result<()>;
+    fn close_handle(&mut self, id: i64) -> Result<()>;
 }

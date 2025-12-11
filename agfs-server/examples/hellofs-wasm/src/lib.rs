@@ -19,19 +19,19 @@ struct HandleState {
 }
 
 /// Counter for generating unique handle IDs
-static mut HANDLE_COUNTER: u64 = 0;
+static mut HANDLE_COUNTER: i64 = 0;
 
-fn generate_handle_id() -> String {
+fn generate_handle_id() -> i64 {
     unsafe {
         HANDLE_COUNTER += 1;
-        format!("wh_{:016x}", HANDLE_COUNTER)
+        HANDLE_COUNTER
     }
 }
 
 #[derive(Default)]
 pub struct HelloFS {
     host_prefix: String,
-    handles: HashMap<String, HandleState>,
+    handles: HashMap<i64, HandleState>,
 }
 
 impl FileSystem for HelloFS {
@@ -226,7 +226,7 @@ impl FileSystem for HelloFS {
 }
 
 impl HandleFS for HelloFS {
-    fn open_handle(&mut self, path: &str, flags: OpenFlag, _mode: u32) -> Result<String> {
+    fn open_handle(&mut self, path: &str, flags: OpenFlag, _mode: u32) -> Result<i64> {
         // Check if file exists (unless O_CREATE is set)
         let exists = self.stat(path).is_ok();
 
@@ -263,12 +263,12 @@ impl HandleFS for HelloFS {
             host_path,
         };
 
-        self.handles.insert(id.clone(), state);
+        self.handles.insert(id, state);
         Ok(id)
     }
 
-    fn handle_read(&mut self, id: &str, buf: &mut [u8]) -> Result<usize> {
-        let state = self.handles.get_mut(id).ok_or(Error::NotFound)?;
+    fn handle_read(&mut self, id: i64, buf: &mut [u8]) -> Result<usize> {
+        let state = self.handles.get_mut(&id).ok_or(Error::NotFound)?;
 
         if !state.flags.is_readable() {
             return Err(Error::PermissionDenied);
@@ -278,15 +278,15 @@ impl HandleFS for HelloFS {
         let n = self.handle_read_at_internal(id, buf, pos)?;
 
         // Update position
-        if let Some(state) = self.handles.get_mut(id) {
+        if let Some(state) = self.handles.get_mut(&id) {
             state.pos += n as i64;
         }
 
         Ok(n)
     }
 
-    fn handle_read_at(&self, id: &str, buf: &mut [u8], offset: i64) -> Result<usize> {
-        let state = self.handles.get(id).ok_or(Error::NotFound)?;
+    fn handle_read_at(&self, id: i64, buf: &mut [u8], offset: i64) -> Result<usize> {
+        let state = self.handles.get(&id).ok_or(Error::NotFound)?;
 
         if !state.flags.is_readable() {
             return Err(Error::PermissionDenied);
@@ -316,8 +316,8 @@ impl HandleFS for HelloFS {
         Ok(0)
     }
 
-    fn handle_write(&mut self, id: &str, data: &[u8]) -> Result<usize> {
-        let state = self.handles.get_mut(id).ok_or(Error::NotFound)?;
+    fn handle_write(&mut self, id: i64, data: &[u8]) -> Result<usize> {
+        let state = self.handles.get_mut(&id).ok_or(Error::NotFound)?;
 
         if !state.flags.is_writable() {
             return Err(Error::PermissionDenied);
@@ -341,15 +341,15 @@ impl HandleFS for HelloFS {
         let n = self.handle_write_at_internal(id, data, pos)?;
 
         // Update position
-        if let Some(state) = self.handles.get_mut(id) {
+        if let Some(state) = self.handles.get_mut(&id) {
             state.pos = pos + n as i64;
         }
 
         Ok(n)
     }
 
-    fn handle_write_at(&self, id: &str, data: &[u8], _offset: i64) -> Result<usize> {
-        let state = self.handles.get(id).ok_or(Error::NotFound)?;
+    fn handle_write_at(&self, id: i64, data: &[u8], _offset: i64) -> Result<usize> {
+        let state = self.handles.get(&id).ok_or(Error::NotFound)?;
 
         if !state.flags.is_writable() {
             return Err(Error::PermissionDenied);
@@ -371,8 +371,8 @@ impl HandleFS for HelloFS {
         Err(Error::PermissionDenied)
     }
 
-    fn handle_seek(&mut self, id: &str, offset: i64, whence: i32) -> Result<i64> {
-        let state = self.handles.get_mut(id).ok_or(Error::NotFound)?;
+    fn handle_seek(&mut self, id: i64, offset: i64, whence: i32) -> Result<i64> {
+        let state = self.handles.get_mut(&id).ok_or(Error::NotFound)?;
 
         let size = if let Some(ref content) = state.content {
             content.len() as i64
@@ -399,13 +399,13 @@ impl HandleFS for HelloFS {
         Ok(state.pos)
     }
 
-    fn handle_sync(&self, id: &str) -> Result<()> {
-        let _ = self.handles.get(id).ok_or(Error::NotFound)?;
+    fn handle_sync(&self, id: i64) -> Result<()> {
+        let _ = self.handles.get(&id).ok_or(Error::NotFound)?;
         Ok(())
     }
 
-    fn handle_stat(&self, id: &str) -> Result<FileInfo> {
-        let state = self.handles.get(id).ok_or(Error::NotFound)?;
+    fn handle_stat(&self, id: i64) -> Result<FileInfo> {
+        let state = self.handles.get(&id).ok_or(Error::NotFound)?;
 
         if let Some(ref content) = state.content {
             return Ok(FileInfo::file("hello.txt", content.len() as i64, 0o644));
@@ -420,24 +420,24 @@ impl HandleFS for HelloFS {
         Err(Error::NotFound)
     }
 
-    fn handle_info(&self, id: &str) -> Result<(String, OpenFlag)> {
-        let state = self.handles.get(id).ok_or(Error::NotFound)?;
+    fn handle_info(&self, id: i64) -> Result<(String, OpenFlag)> {
+        let state = self.handles.get(&id).ok_or(Error::NotFound)?;
         Ok((state.path.clone(), state.flags))
     }
 
-    fn close_handle(&mut self, id: &str) -> Result<()> {
-        self.handles.remove(id).ok_or(Error::NotFound)?;
+    fn close_handle(&mut self, id: i64) -> Result<()> {
+        self.handles.remove(&id).ok_or(Error::NotFound)?;
         Ok(())
     }
 }
 
 // Helper methods for internal use
 impl HelloFS {
-    fn handle_read_at_internal(&self, id: &str, buf: &mut [u8], offset: i64) -> Result<usize> {
+    fn handle_read_at_internal(&self, id: i64, buf: &mut [u8], offset: i64) -> Result<usize> {
         self.handle_read_at(id, buf, offset)
     }
 
-    fn handle_write_at_internal(&self, id: &str, data: &[u8], offset: i64) -> Result<usize> {
+    fn handle_write_at_internal(&self, id: i64, data: &[u8], offset: i64) -> Result<usize> {
         self.handle_write_at(id, data, offset)
     }
 }

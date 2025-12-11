@@ -2,6 +2,8 @@
 UPLOAD command - (auto-migrated from builtins.py)
 """
 
+import os
+
 from ..process import Process
 from ..command_decorators import command
 from . import register_command
