@@ -130,7 +130,7 @@ func (h *Handler) OpenHandle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Default lease: 60 seconds (this is informational - actual lease is managed by HandleManager if used)
+	// Handle opened successfully
 	response := HandleOpenResponse{
 		HandleID:  handle.ID(),
 		Path:      handle.Path(),
@@ -550,11 +550,11 @@ func (h *Handler) SetupHandleRoutes(mux *http.ServeMux) {
 }
 
 // ListHandles handles GET /api/v1/handles - list all active handles
-// Note: This is a simplified implementation. A full implementation would
-// use HandleManager to track all handles with their metadata.
+// Note: This returns an empty list as handles are managed per-request
+// and there is no central registry. Handles are tracked within each
+// mounted filesystem instance.
 func (h *Handler) ListHandles(w http.ResponseWriter, r *http.Request) {
-	// For now, return empty list since we don't have a central handle registry
-	// A full implementation would use HandleManager
+	// Return empty list - handles are managed by individual filesystem instances
 	response := HandleListResponse{
 		Handles: []HandleInfoResponse{},
 		Count:   0,

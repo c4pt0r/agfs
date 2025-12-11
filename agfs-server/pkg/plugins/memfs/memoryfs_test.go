@@ -394,8 +394,8 @@ func TestMemoryFSOpenHandle(t *testing.T) {
 	}
 	defer handle.Close()
 
-	if handle.ID() == "" {
-		t.Error("Handle ID should not be empty")
+	if handle.ID() == 0 {
+		t.Error("Handle ID should not be zero")
 	}
 	if handle.Path() != "/test.txt" {
 		t.Errorf("Path mismatch: got %s, want /test.txt", handle.Path())
