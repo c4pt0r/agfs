@@ -995,3 +995,214 @@ func (qfs *queueFS) clear(queueName string) error {
 // Ensure QueueFSPlugin implements ServicePlugin
 var _ plugin.ServicePlugin = (*QueueFSPlugin)(nil)
 var _ filesystem.FileSystem = (*queueFS)(nil)
+var _ filesystem.HandleFS = (*queueFS)(nil)
+
+// ============================================================================
+// HandleFS Implementation for QueueFS
+// ============================================================================
+
+// queueFileHandle represents an open handle to a queue control file
+type queueFileHandle struct {
+	id        int64
+	qfs       *queueFS
+	path      string
+	queueName string
+	operation string // "enqueue", "dequeue", "peek", "size", "clear"
+	flags     filesystem.OpenFlag
+
+	// For dequeue/peek: cached message data (read once, return from cache)
+	readBuffer []byte
+	readDone   bool
+
+	mu sync.Mutex
+}
+
+// handleManager manages open handles for queueFS
+type handleManager struct {
+	handles  map[int64]*queueFileHandle
+	nextID   int64
+	mu       sync.Mutex
+}
+
+// Global handle manager for queueFS (per plugin instance would be better, but keeping it simple)
+var queueHandleManager = &handleManager{
+	handles: make(map[int64]*queueFileHandle),
+	nextID:  1,
+}
+
+// OpenHandle opens a file and returns a handle for stateful operations
+func (qfs *queueFS) OpenHandle(path string, flags filesystem.OpenFlag, mode uint32) (filesystem.FileHandle, error) {
+	queueName, operation, isDir, err := parseQueuePath(path)
+	if err != nil {
+		return nil, err
+	}
+
+	if isDir {
+		return nil, fmt.Errorf("cannot open directory as file: %s", path)
+	}
+
+	if operation == "" {
+		return nil, fmt.Errorf("cannot open queue directory: %s", path)
+	}
+
+	// Validate operation
+	if !queueOperations[operation] {
+		return nil, fmt.Errorf("unknown operation: %s", operation)
+	}
+
+	queueHandleManager.mu.Lock()
+	defer queueHandleManager.mu.Unlock()
+
+	id := queueHandleManager.nextID
+	queueHandleManager.nextID++
+
+	handle := &queueFileHandle{
+		id:        id,
+		qfs:       qfs,
+		path:      path,
+		queueName: queueName,
+		operation: operation,
+		flags:     flags,
+	}
+
+	queueHandleManager.handles[id] = handle
+	return handle, nil
+}
+
+// GetHandle retrieves an existing handle by its ID
+func (qfs *queueFS) GetHandle(id int64) (filesystem.FileHandle, error) {
+	queueHandleManager.mu.Lock()
+	defer queueHandleManager.mu.Unlock()
+
+	handle, ok := queueHandleManager.handles[id]
+	if !ok {
+		return nil, filesystem.ErrNotFound
+	}
+	return handle, nil
+}
+
+// CloseHandle closes a handle by its ID
+func (qfs *queueFS) CloseHandle(id int64) error {
+	queueHandleManager.mu.Lock()
+	defer queueHandleManager.mu.Unlock()
+
+	handle, ok := queueHandleManager.handles[id]
+	if !ok {
+		return filesystem.ErrNotFound
+	}
+
+	delete(queueHandleManager.handles, id)
+	_ = handle // Clear reference
+	return nil
+}
+
+// ============================================================================
+// FileHandle Implementation
+// ============================================================================
+
+func (h *queueFileHandle) ID() int64 {
+	return h.id
+}
+
+func (h *queueFileHandle) Path() string {
+	return h.path
+}
+
+func (h *queueFileHandle) Flags() filesystem.OpenFlag {
+	return h.flags
+}
+
+func (h *queueFileHandle) Read(buf []byte) (int, error) {
+	return h.ReadAt(buf, 0)
+}
+
+func (h *queueFileHandle) ReadAt(buf []byte, offset int64) (int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// For dequeue/peek: fetch data once and cache it
+	if !h.readDone {
+		var data []byte
+		var err error
+
+		switch h.operation {
+		case "dequeue":
+			data, err = h.qfs.dequeue(h.queueName)
+		case "peek":
+			data, err = h.qfs.peek(h.queueName)
+		case "size":
+			data, err = h.qfs.size(h.queueName)
+		case "enqueue", "clear":
+			// These are write-only operations
+			return 0, io.EOF
+		default:
+			return 0, fmt.Errorf("unsupported read operation: %s", h.operation)
+		}
+
+		if err != nil {
+			return 0, err
+		}
+
+		h.readBuffer = data
+		h.readDone = true
+	}
+
+	// Return from cache
+	if offset >= int64(len(h.readBuffer)) {
+		return 0, io.EOF
+	}
+
+	n := copy(buf, h.readBuffer[offset:])
+	return n, nil
+}
+
+func (h *queueFileHandle) Write(data []byte) (int, error) {
+	return h.WriteAt(data, 0)
+}
+
+func (h *queueFileHandle) WriteAt(data []byte, offset int64) (int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	switch h.operation {
+	case "enqueue":
+		_, err := h.qfs.enqueue(h.queueName, data)
+		if err != nil {
+			return 0, err
+		}
+		return len(data), nil
+	case "clear":
+		err := h.qfs.clear(h.queueName)
+		if err != nil {
+			return 0, err
+		}
+		return len(data), nil
+	case "dequeue", "peek", "size":
+		return 0, fmt.Errorf("cannot write to %s", h.operation)
+	default:
+		return 0, fmt.Errorf("unsupported write operation: %s", h.operation)
+	}
+}
+
+func (h *queueFileHandle) Seek(offset int64, whence int) (int64, error) {
+	// Queue files don't support seeking in the traditional sense
+	// Just return 0 for compatibility
+	return 0, nil
+}
+
+func (h *queueFileHandle) Sync() error {
+	// Nothing to sync for queue operations
+	return nil
+}
+
+func (h *queueFileHandle) Close() error {
+	queueHandleManager.mu.Lock()
+	defer queueHandleManager.mu.Unlock()
+
+	delete(queueHandleManager.handles, h.id)
+	return nil
+}
+
+func (h *queueFileHandle) Stat() (*filesystem.FileInfo, error) {
+	return h.qfs.Stat(h.path)
+}

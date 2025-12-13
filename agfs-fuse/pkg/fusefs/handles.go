@@ -24,9 +24,8 @@ type handleInfo struct {
 	path       string
 	flags      agfs.OpenFlag
 	mode       uint32
-	// Write buffer for local handles - accumulates writes until Close
-	writeBuffer []byte
-	dirty       bool // true if writeBuffer has data to be flushed
+	// Read buffer for local handles - caches first read to avoid multiple server requests
+	readBuffer []byte
 }
 
 // HandleManager manages the mapping between FUSE handles and AGFS handles
@@ -111,28 +110,21 @@ func (hm *HandleManager) Close(fuseHandle uint64) error {
 		return nil
 	}
 
-	// Local handles: flush write buffer if dirty
-	if info.dirty && len(info.writeBuffer) > 0 {
-		_, err := hm.client.Write(info.path, info.writeBuffer)
-		if err != nil {
-			return fmt.Errorf("failed to flush write buffer: %w", err)
-		}
-	}
-
+	// Local handles: nothing to do on close since writes are sent immediately
 	return nil
 }
 
 // Read reads data from a handle
 func (hm *HandleManager) Read(fuseHandle uint64, offset int64, size int) ([]byte, error) {
-	hm.mu.RLock()
+	hm.mu.Lock()
 	info, ok := hm.handles[fuseHandle]
-	hm.mu.RUnlock()
-
 	if !ok {
+		hm.mu.Unlock()
 		return nil, fmt.Errorf("handle %d not found", fuseHandle)
 	}
 
 	if info.htype == handleTypeRemote {
+		hm.mu.Unlock()
 		// Use server-side handle
 		data, err := hm.client.ReadHandle(info.agfsHandle, offset, size)
 		if err != nil {
@@ -141,12 +133,58 @@ func (hm *HandleManager) Read(fuseHandle uint64, offset int64, size int) ([]byte
 		return data, nil
 	}
 
-	// Local handle: use direct Read API from SDK
-	data, err := hm.client.Read(info.path, offset, int64(size))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read file: %w", err)
+	// Local handle: cache the first read and return from cache for subsequent reads
+	// This is critical for special filesystems like queuefs where each read
+	// should be an independent atomic operation (e.g., each read from dequeue
+	// should consume only one message, not multiple)
+	if info.readBuffer == nil {
+		// First read: fetch ALL data from server and cache (use size=-1 to read all)
+		path := info.path
+		hm.mu.Unlock()
+
+		data, err := hm.client.Read(path, 0, -1) // Read all data
+		if err != nil {
+			return nil, fmt.Errorf("failed to read file: %w", err)
+		}
+
+		// Cache the data
+		hm.mu.Lock()
+		// Re-check if handle still exists
+		info, ok = hm.handles[fuseHandle]
+		if ok {
+			info.readBuffer = data
+		}
+		hm.mu.Unlock()
+
+		// Return requested portion
+		if offset >= int64(len(data)) {
+			return []byte{}, nil
+		}
+		end := offset + int64(size)
+		if end > int64(len(data)) {
+			end = int64(len(data))
+		}
+		return data[offset:end], nil
 	}
-	return data, nil
+
+	// Return from cache or empty for subsequent reads
+	if info.readBuffer != nil {
+		if offset >= int64(len(info.readBuffer)) {
+			hm.mu.Unlock()
+			return []byte{}, nil // EOF
+		}
+		end := offset + int64(size)
+		if end > int64(len(info.readBuffer)) {
+			end = int64(len(info.readBuffer))
+		}
+		result := info.readBuffer[offset:end]
+		hm.mu.Unlock()
+		return result, nil
+	}
+
+	// No cached data and offset > 0, return empty
+	hm.mu.Unlock()
+	return []byte{}, nil
 }
 
 // Write writes data to a handle
@@ -168,35 +206,18 @@ func (hm *HandleManager) Write(fuseHandle uint64, data []byte, offset int64) (in
 		return written, nil
 	}
 
-	// Local handle: buffer the write data
-	// This ensures all writes are accumulated and sent as one request on Close
-	// which is critical for queuefs enqueue to work correctly with large messages
-	if offset == 0 && len(info.writeBuffer) == 0 {
-		// First write at offset 0: initialize buffer
-		info.writeBuffer = make([]byte, len(data))
-		copy(info.writeBuffer, data)
-	} else if offset == int64(len(info.writeBuffer)) {
-		// Sequential append
-		info.writeBuffer = append(info.writeBuffer, data...)
-	} else if offset < int64(len(info.writeBuffer)) {
-		// Overwrite within existing buffer
-		endOffset := offset + int64(len(data))
-		if endOffset > int64(len(info.writeBuffer)) {
-			// Extend buffer if needed
-			newBuf := make([]byte, endOffset)
-			copy(newBuf, info.writeBuffer)
-			info.writeBuffer = newBuf
-		}
-		copy(info.writeBuffer[offset:], data)
-	} else {
-		// Gap in write - extend with zeros
-		newBuf := make([]byte, offset+int64(len(data)))
-		copy(newBuf, info.writeBuffer)
-		copy(newBuf[offset:], data)
-		info.writeBuffer = newBuf
-	}
-	info.dirty = true
+	// Local handle: send data directly to server for each write
+	// This is critical for special filesystems like queuefs where each write
+	// should be an independent atomic operation (e.g., each write to enqueue
+	// should create a separate queue message)
+	path := info.path
 	hm.mu.Unlock()
+
+	// Send directly to server
+	_, err := hm.client.Write(path, data)
+	if err != nil {
+		return 0, fmt.Errorf("failed to write to server: %w", err)
+	}
 
 	return len(data), nil
 }
@@ -219,20 +240,7 @@ func (hm *HandleManager) Sync(fuseHandle uint64) error {
 		return nil
 	}
 
-	// Local handles: flush write buffer if dirty
-	if info.dirty && len(info.writeBuffer) > 0 {
-		data := info.writeBuffer
-		info.writeBuffer = nil
-		info.dirty = false
-		hm.mu.Unlock()
-
-		_, err := hm.client.Write(info.path, data)
-		if err != nil {
-			return fmt.Errorf("failed to sync write buffer: %w", err)
-		}
-		return nil
-	}
-
+	// Local handles: nothing to sync since writes are sent immediately
 	hm.mu.Unlock()
 	return nil
 }
