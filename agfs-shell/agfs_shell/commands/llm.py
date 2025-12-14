@@ -17,6 +17,7 @@ def cmd_llm(process: Process) -> int:
            echo "text" | llm [OPTIONS]
            cat files | llm [OPTIONS] [PROMPT]
            cat image.jpg | llm [OPTIONS] [PROMPT]
+           cat audio.wav | llm [OPTIONS] [PROMPT]
 
     Options:
         -m MODEL    Specify the model to use (default: gpt-4o-mini)
@@ -39,6 +40,10 @@ def cmd_llm(process: Process) -> int:
         Automatically detects image input (JPEG, PNG, GIF, WebP, BMP) from stdin
         and uses vision-capable models for image analysis.
 
+    Audio Support:
+        Automatically detects audio input (WAV, MP3) from stdin, transcribes it
+        using OpenAI Whisper API, then processes with the LLM.
+
     Examples:
         # Text prompts
         llm "What is 2+2?"
@@ -50,6 +55,11 @@ def cmd_llm(process: Process) -> int:
         cat photo.jpg | llm "What's in this image?"
         cat screenshot.png | llm "Describe this screenshot in detail"
         cat diagram.png | llm
+
+        # Audio transcription and analysis
+        cat recording.wav | llm "summarize the recording"
+        cat podcast.mp3 | llm "extract key points"
+        cat meeting.wav | llm
 
         # Advanced usage
         llm -m claude-3-5-sonnet-20241022 "Explain quantum computing"
@@ -148,6 +158,63 @@ def cmd_llm(process: Process) -> int:
             return True
         return False
 
+    # Helper function to detect if binary data is audio
+    def is_audio(data):
+        """Detect if binary data is audio by checking magic numbers"""
+        if not data or len(data) < 12:
+            return False
+        # Check common audio formats
+        if data.startswith(b'RIFF') and data[8:12] == b'WAVE':  # WAV
+            return True
+        if data.startswith(b'ID3') or data.startswith(b'\xFF\xFB') or data.startswith(b'\xFF\xF3') or data.startswith(b'\xFF\xF2'):  # MP3
+            return True
+        return False
+
+    # Helper function to transcribe audio using OpenAI Whisper
+    def transcribe_audio(audio_data, api_key=None):
+        """Transcribe audio data using OpenAI Whisper API"""
+        try:
+            import openai
+            import tempfile
+            import os
+        except ImportError:
+            return None, "openai library not installed. Run: pip install openai"
+
+        # Determine file extension based on audio format
+        if audio_data.startswith(b'RIFF') and audio_data[8:12] == b'WAVE':
+            ext = '.wav'
+        else:
+            ext = '.mp3'
+
+        # Write audio data to temporary file
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp_file:
+            tmp_file.write(audio_data)
+            tmp_path = tmp_file.name
+
+        try:
+            # Create OpenAI client
+            if api_key:
+                client = openai.OpenAI(api_key=api_key)
+            else:
+                client = openai.OpenAI()  # Uses OPENAI_API_KEY from environment
+
+            # Transcribe audio
+            with open(tmp_path, 'rb') as audio_file:
+                transcript = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file
+                )
+
+            return transcript.text, None
+        except Exception as e:
+            return None, f"Failed to transcribe audio: {str(e)}"
+        finally:
+            # Clean up temporary file
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
     # Get stdin content if available (keep as binary first)
     stdin_binary = None
     stdin_text = None
@@ -162,18 +229,28 @@ def cmd_llm(process: Process) -> int:
         except Exception:
             pass  # No stdin available
 
-    # Check if stdin is an image
+    # Check if stdin is an image or audio
     is_stdin_image = False
+    is_stdin_audio = False
     if stdin_binary:
         is_stdin_image = is_image(stdin_binary)
         if not is_stdin_image:
-            # Try to decode as text
-            try:
-                stdin_text = stdin_binary.decode('utf-8').strip()
-            except UnicodeDecodeError:
-                # Binary data but not an image we recognize
-                process.stderr.write(b"llm: stdin contains binary data that is not a recognized image format\n")
-                return 1
+            is_stdin_audio = is_audio(stdin_binary)
+            if is_stdin_audio:
+                # Transcribe audio
+                transcript_text, error = transcribe_audio(stdin_binary, api_key)
+                if error:
+                    process.stderr.write(f"llm: {error}\n".encode('utf-8'))
+                    return 1
+                stdin_text = transcript_text
+            else:
+                # Try to decode as text
+                try:
+                    stdin_text = stdin_binary.decode('utf-8').strip()
+                except UnicodeDecodeError:
+                    # Binary data but not an image or audio we recognize
+                    process.stderr.write(b"llm: stdin contains binary data that is not a recognized image or audio format\n")
+                    return 1
 
     # Get prompt from args
     prompt_text = None
