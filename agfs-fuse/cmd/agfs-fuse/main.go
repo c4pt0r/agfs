@@ -19,7 +19,7 @@ import (
 
 func main() {
 	var (
-		serverURL   = flag.String("agfs-server-url", "", "AGFS server URL")
+		serverURL   = flag.String("agfs-server-url", "http://localhost:8080", "AGFS server URL")
 		mountpoint  = flag.String("mount", "", "Mount point directory")
 		cacheTTL    = flag.Duration("cache-ttl", 5*time.Second, "Cache TTL duration")
 		debug       = flag.Bool("debug", false, "Enable debug output")
@@ -67,8 +67,8 @@ func main() {
 	log.SetLevel(level)
 
 	// Check required arguments
-	if *serverURL == "" || *mountpoint == "" {
-		fmt.Fprintf(os.Stderr, "Error: --agfs-server-url and --mount are required\n\n")
+	if *mountpoint == "" {
+		fmt.Fprintf(os.Stderr, "Error: --mount is required\n\n")
 		flag.Usage()
 		os.Exit(1)
 	}
