@@ -420,6 +420,11 @@ func isSessionFile(name string) bool {
 	return name == "ctl" || name == "query" || name == "result" || name == "data" || name == "error"
 }
 
+// isDatabaseLevelFile checks if the given name is a database-level special file
+func isDatabaseLevelFile(name string) bool {
+	return name == "ctl"
+}
+
 // parsePath parses a path into (dbName, tableName, sid, operation)
 // Supported paths:
 //   /                              -> ("", "", "", "")
@@ -427,6 +432,9 @@ func isSessionFile(name string) bool {
 //   /<sid>                         -> ("", "", sid, "")   - root level session
 //   /<sid>/query                   -> ("", "", sid, "query")
 //   /dbName                        -> (dbName, "", "", "")
+//   /dbName/ctl                    -> (dbName, "", "", "ctl") - database level ctl
+//   /dbName/<sid>                  -> (dbName, "", sid, "") - database level session
+//   /dbName/<sid>/query            -> (dbName, "", sid, "query") - database level session file
 //   /dbName/tableName              -> (dbName, tableName, "", "")
 //   /dbName/tableName/ctl          -> (dbName, tableName, "", "ctl")
 //   /dbName/tableName/schema       -> (dbName, tableName, "", "schema")
@@ -464,20 +472,35 @@ func (fs *sqlfs2FS) parsePath(path string) (dbName, tableName, sid, operation st
 	if len(parts) == 2 {
 		// Could be:
 		// - /<sid>/query -> root level session file
+		// - /dbName/ctl -> database level ctl file
+		// - /dbName/<sid> -> database level session directory
 		// - /dbName/tableName -> table directory
 		if isSessionID(parts[0]) && isSessionFile(parts[1]) {
 			return "", "", parts[0], parts[1], nil
+		}
+		if isDatabaseLevelFile(parts[1]) {
+			// Database level ctl: /dbName/ctl
+			return parts[0], "", "", parts[1], nil
+		}
+		if isSessionID(parts[1]) {
+			// Database level session: /dbName/<sid>
+			return parts[0], "", parts[1], "", nil
 		}
 		// Table level: /dbName/tableName
 		return parts[0], parts[1], "", "", nil
 	}
 
 	if len(parts) == 3 {
-		// Either table-level file or session directory
-		// /dbName/tableName/ctl -> table-level ctl
-		// /dbName/tableName/schema -> table-level schema
-		// /dbName/tableName/count -> table-level count
-		// /dbName/tableName/<sid> -> session directory
+		// Could be:
+		// - /dbName/<sid>/query -> database level session file
+		// - /dbName/tableName/ctl -> table-level ctl
+		// - /dbName/tableName/schema -> table-level schema
+		// - /dbName/tableName/count -> table-level count
+		// - /dbName/tableName/<sid> -> session directory
+		if isSessionID(parts[1]) && isSessionFile(parts[2]) {
+			// Database level session file: /dbName/<sid>/query
+			return parts[0], "", parts[1], parts[2], nil
+		}
 		if isTableLevelFile(parts[2]) {
 			return parts[0], parts[1], "", parts[2], nil
 		}
@@ -548,6 +571,73 @@ func (fs *sqlfs2FS) Read(path string, offset int64, size int64) ([]byte, error) 
 	// Root-level session files (no db, no table, but has session)
 	if dbName == "" && tableName == "" && sid != "" {
 		session := fs.sessionManager.GetSession("", "", sid)
+		if session == nil {
+			return nil, fmt.Errorf("session not found: %s", sid)
+		}
+
+		switch operation {
+		case "result":
+			session.mu.Lock()
+			result := session.result
+			session.mu.Unlock()
+
+			if result == nil {
+				return []byte{}, nil
+			}
+			return plugin.ApplyRangeRead(result, offset, size)
+
+		case "error":
+			session.mu.Lock()
+			errMsg := session.lastError
+			session.mu.Unlock()
+
+			if errMsg == "" {
+				return []byte{}, nil
+			}
+			data := []byte(errMsg + "\n")
+			return plugin.ApplyRangeRead(data, offset, size)
+
+		case "query", "data", "ctl":
+			return nil, fmt.Errorf("%s is write-only", operation)
+
+		case "":
+			// Session directory
+			return nil, filesystem.NewInvalidArgumentError("path", path, "is a directory")
+
+		default:
+			return nil, fmt.Errorf("unknown session file: %s", operation)
+		}
+	}
+
+	// Database-level files (has db, no table, no session)
+	if dbName != "" && tableName == "" && sid == "" {
+		switch operation {
+		case "ctl":
+			// Database-level ctl: creates a database-scoped session (no table binding)
+			// Switch to database if needed
+			if err := fs.plugin.backend.SwitchDatabase(fs.plugin.db, dbName); err != nil {
+				return nil, err
+			}
+
+			session, err := fs.sessionManager.CreateSession(fs.plugin.db, dbName, "")
+			if err != nil {
+				return nil, err
+			}
+			data := []byte(fmt.Sprintf("%d\n", session.id))
+			return plugin.ApplyRangeRead(data, offset, size)
+
+		case "":
+			// Database directory
+			return nil, filesystem.NewInvalidArgumentError("path", path, "is a directory")
+
+		default:
+			return nil, fmt.Errorf("unknown database-level file: %s", operation)
+		}
+	}
+
+	// Database-level session files (has db, no table, but has session)
+	if dbName != "" && tableName == "" && sid != "" {
+		session := fs.sessionManager.GetSession(dbName, "", sid)
 		if session == nil {
 			return nil, fmt.Errorf("session not found: %s", sid)
 		}
@@ -659,7 +749,7 @@ func (fs *sqlfs2FS) Read(path string, offset int64, size int64) ([]byte, error) 
 		}
 	}
 
-	// Session-level files
+	// Session-level files (table-bound sessions)
 	session := fs.sessionManager.GetSession(dbName, tableName, sid)
 	if session == nil {
 		return nil, fmt.Errorf("session not found: %s", sid)
@@ -845,6 +935,146 @@ func (fs *sqlfs2FS) Write(path string, data []byte, offset int64, flags filesyst
 		}
 	}
 
+	// Database-level files (has db, no table, no session)
+	if dbName != "" && tableName == "" && sid == "" {
+		switch operation {
+		case "":
+			return 0, fmt.Errorf("cannot write to directory: %s", path)
+		case "ctl":
+			return 0, fmt.Errorf("ctl is read-only")
+		default:
+			return 0, fmt.Errorf("unknown database-level file: %s", operation)
+		}
+	}
+
+	// Database-level session files (has db, no table, but has session)
+	if dbName != "" && tableName == "" && sid != "" {
+		session := fs.sessionManager.GetSession(dbName, "", sid)
+		if session == nil {
+			return 0, fmt.Errorf("session not found: %s", sid)
+		}
+
+		session.mu.Lock()
+		defer session.mu.Unlock()
+
+		switch operation {
+		case "ctl":
+			cmd := strings.TrimSpace(string(data))
+			if cmd == "close" {
+				session.mu.Unlock()
+				err := fs.sessionManager.CloseSession(dbName, "", sid)
+				session.mu.Lock()
+				if err != nil {
+					return 0, err
+				}
+				return int64(len(data)), nil
+			}
+			return 0, fmt.Errorf("unknown ctl command: %s", cmd)
+
+		case "query":
+			// Execute SQL query and store result
+			sqlStmt := strings.TrimSpace(string(data))
+			if sqlStmt == "" {
+				session.lastError = "empty SQL statement"
+				return 0, fmt.Errorf("empty SQL statement")
+			}
+
+			// Determine if this is a SELECT query
+			upperSQL := strings.ToUpper(sqlStmt)
+			isSelect := strings.HasPrefix(upperSQL, "SELECT") ||
+				strings.HasPrefix(upperSQL, "SHOW") ||
+				strings.HasPrefix(upperSQL, "DESCRIBE") ||
+				strings.HasPrefix(upperSQL, "EXPLAIN")
+
+			if isSelect {
+				rows, err := session.tx.Query(sqlStmt)
+				if err != nil {
+					session.lastError = err.Error()
+					session.result = nil
+					return 0, fmt.Errorf("query error: %w", err)
+				}
+				defer rows.Close()
+
+				columns, err := rows.Columns()
+				if err != nil {
+					session.lastError = err.Error()
+					session.result = nil
+					return 0, fmt.Errorf("failed to get columns: %w", err)
+				}
+
+				var results []map[string]interface{}
+				for rows.Next() {
+					values := make([]interface{}, len(columns))
+					valuePtrs := make([]interface{}, len(columns))
+					for i := range values {
+						valuePtrs[i] = &values[i]
+					}
+
+					if err := rows.Scan(valuePtrs...); err != nil {
+						session.lastError = err.Error()
+						session.result = nil
+						return 0, fmt.Errorf("scan error: %w", err)
+					}
+
+					row := make(map[string]interface{})
+					for i, col := range columns {
+						val := values[i]
+						if b, ok := val.([]byte); ok {
+							row[col] = string(b)
+						} else {
+							row[col] = val
+						}
+					}
+					results = append(results, row)
+				}
+
+				if err := rows.Err(); err != nil {
+					session.lastError = err.Error()
+					session.result = nil
+					return 0, fmt.Errorf("rows error: %w", err)
+				}
+
+				jsonData, err := json.MarshalIndent(results, "", "  ")
+				if err != nil {
+					session.lastError = err.Error()
+					session.result = nil
+					return 0, fmt.Errorf("json marshal error: %w", err)
+				}
+				session.result = append(jsonData, '\n')
+				session.lastError = ""
+			} else {
+				result, err := session.tx.Exec(sqlStmt)
+				if err != nil {
+					session.lastError = err.Error()
+					session.result = nil
+					return 0, fmt.Errorf("execution error: %w", err)
+				}
+
+				rowsAffected, _ := result.RowsAffected()
+				lastInsertId, _ := result.LastInsertId()
+
+				resultMap := map[string]interface{}{
+					"rows_affected":  rowsAffected,
+					"last_insert_id": lastInsertId,
+				}
+				jsonData, _ := json.MarshalIndent(resultMap, "", "  ")
+				session.result = append(jsonData, '\n')
+				session.lastError = ""
+			}
+
+			return int64(len(data)), nil
+
+		case "result", "error":
+			return 0, fmt.Errorf("%s is read-only", operation)
+
+		case "":
+			return 0, fmt.Errorf("cannot write to directory: %s", path)
+
+		default:
+			return 0, fmt.Errorf("unknown session file: %s", operation)
+		}
+	}
+
 	// Table-level files (no session)
 	if sid == "" {
 		switch operation {
@@ -857,7 +1087,7 @@ func (fs *sqlfs2FS) Write(path string, data []byte, offset int64, flags filesyst
 		}
 	}
 
-	// Session-level files
+	// Session-level files (table-bound sessions)
 	session := fs.sessionManager.GetSession(dbName, tableName, sid)
 	if session == nil {
 		return 0, fmt.Errorf("session not found: %s", sid)
@@ -1141,6 +1371,12 @@ func (fs *sqlfs2FS) RemoveAll(path string) error {
 		return fs.sessionManager.CloseSession("", "", sid)
 	}
 
+	// Support removing database-level session
+	// Path should be /dbName/<sid>
+	if dbName != "" && tableName == "" && sid != "" && operation == "" {
+		return fs.sessionManager.CloseSession(dbName, "", sid)
+	}
+
 	// Support removing database (DROP DATABASE)
 	// Path should be /dbName
 	if dbName != "" && tableName == "" && sid == "" && operation == "" {
@@ -1278,16 +1514,39 @@ func (fs *sqlfs2FS) ReadDir(path string) ([]filesystem.FileInfo, error) {
 		}, nil
 	}
 
-	// Database level: list tables (only if no session at root)
-	if tableName == "" && sid == "" {
+	// Database level: list ctl, tables, and database-level sessions
+	if dbName != "" && tableName == "" && sid == "" && operation == "" {
+		entries := []filesystem.FileInfo{
+			{
+				Name:    "ctl",
+				Size:    0,
+				Mode:    0444, // read-only (reading creates session)
+				ModTime: now,
+				IsDir:   false,
+				Meta:    filesystem.MetaData{Name: PluginName, Type: "ctl"},
+			},
+		}
+
+		// Add database-level sessions
+		sids := fs.sessionManager.ListSessions(dbName, "")
+		for _, s := range sids {
+			entries = append(entries, filesystem.FileInfo{
+				Name:    s,
+				Size:    0,
+				Mode:    0755,
+				ModTime: now,
+				IsDir:   true,
+				Meta:    filesystem.MetaData{Name: PluginName, Type: "session"},
+			})
+		}
+
+		// Add tables
 		tableNames, err := fs.plugin.backend.ListTables(fs.plugin.db, dbName)
 		if err != nil {
 			return nil, err
 		}
-
-		var tables []filesystem.FileInfo
 		for _, name := range tableNames {
-			tables = append(tables, filesystem.FileInfo{
+			entries = append(entries, filesystem.FileInfo{
 				Name:    name,
 				Size:    0,
 				Mode:    0755,
@@ -1296,28 +1555,50 @@ func (fs *sqlfs2FS) ReadDir(path string) ([]filesystem.FileInfo, error) {
 				Meta:    filesystem.MetaData{Name: PluginName, Type: "table"},
 			})
 		}
-		return tables, nil
+		return entries, nil
 	}
 
-	// Database level: list tables
-	if tableName == "" {
-		tableNames, err := fs.plugin.backend.ListTables(fs.plugin.db, dbName)
-		if err != nil {
-			return nil, err
+	// Database-level session directory
+	if dbName != "" && tableName == "" && sid != "" && operation == "" {
+		session := fs.sessionManager.GetSession(dbName, "", sid)
+		if session == nil {
+			return nil, fmt.Errorf("session not found: %s", sid)
 		}
 
-		var tables []filesystem.FileInfo
-		for _, name := range tableNames {
-			tables = append(tables, filesystem.FileInfo{
-				Name:    name,
+		return []filesystem.FileInfo{
+			{
+				Name:    "ctl",
 				Size:    0,
-				Mode:    0755,
+				Mode:    0222,
 				ModTime: now,
-				IsDir:   true,
-				Meta:    filesystem.MetaData{Name: PluginName, Type: "table"},
-			})
-		}
-		return tables, nil
+				IsDir:   false,
+				Meta:    filesystem.MetaData{Name: PluginName, Type: "session-ctl"},
+			},
+			{
+				Name:    "query",
+				Size:    0,
+				Mode:    0222,
+				ModTime: now,
+				IsDir:   false,
+				Meta:    filesystem.MetaData{Name: PluginName, Type: "query"},
+			},
+			{
+				Name:    "result",
+				Size:    0,
+				Mode:    0444,
+				ModTime: now,
+				IsDir:   false,
+				Meta:    filesystem.MetaData{Name: PluginName, Type: "result"},
+			},
+			{
+				Name:    "error",
+				Size:    0,
+				Mode:    0444,
+				ModTime: now,
+				IsDir:   false,
+				Meta:    filesystem.MetaData{Name: PluginName, Type: "error"},
+			},
+		}, nil
 	}
 
 	// Table level: list ctl, schema, count, and session directories
@@ -1502,7 +1783,7 @@ func (fs *sqlfs2FS) Stat(path string) (*filesystem.FileInfo, error) {
 	}
 
 	// Database directory
-	if tableName == "" && sid == "" {
+	if dbName != "" && tableName == "" && sid == "" && operation == "" {
 		return &filesystem.FileInfo{
 			Name:    dbName,
 			Size:    0,
@@ -1510,6 +1791,59 @@ func (fs *sqlfs2FS) Stat(path string) (*filesystem.FileInfo, error) {
 			ModTime: now,
 			IsDir:   true,
 			Meta:    filesystem.MetaData{Name: PluginName, Type: "database"},
+		}, nil
+	}
+
+	// Database-level ctl file
+	if dbName != "" && tableName == "" && sid == "" && operation == "ctl" {
+		return &filesystem.FileInfo{
+			Name:    "ctl",
+			Size:    0,
+			Mode:    0444,
+			ModTime: now,
+			IsDir:   false,
+			Meta:    filesystem.MetaData{Name: PluginName, Type: "ctl"},
+		}, nil
+	}
+
+	// Database-level session directory
+	if dbName != "" && tableName == "" && sid != "" && operation == "" {
+		session := fs.sessionManager.GetSession(dbName, "", sid)
+		if session == nil {
+			return nil, fmt.Errorf("session not found: %s", sid)
+		}
+		return &filesystem.FileInfo{
+			Name:    sid,
+			Size:    0,
+			Mode:    0755,
+			ModTime: now,
+			IsDir:   true,
+			Meta:    filesystem.MetaData{Name: PluginName, Type: "session"},
+		}, nil
+	}
+
+	// Database-level session files
+	if dbName != "" && tableName == "" && sid != "" && operation != "" {
+		session := fs.sessionManager.GetSession(dbName, "", sid)
+		if session == nil {
+			return nil, fmt.Errorf("session not found: %s", sid)
+		}
+		var mode uint32
+		switch operation {
+		case "ctl", "query":
+			mode = 0222 // write-only
+		case "result", "error":
+			mode = 0444 // read-only
+		default:
+			return nil, fmt.Errorf("unknown session file: %s", operation)
+		}
+		return &filesystem.FileInfo{
+			Name:    operation,
+			Size:    0,
+			Mode:    mode,
+			ModTime: now,
+			IsDir:   false,
+			Meta:    filesystem.MetaData{Name: PluginName, Type: operation},
 		}, nil
 	}
 
@@ -1832,6 +2166,45 @@ func (h *SQLFileHandle) Read(buf []byte) (int, error) {
 // populateReadBuffer fills the read buffer based on the operation type
 func (h *SQLFileHandle) populateReadBuffer() error {
 	switch h.operation {
+	case "ctl":
+		// Reading ctl creates a new session and returns the session ID
+		// For root-level ctl (no db, no table)
+		if h.dbName == "" && h.tableName == "" {
+			session, err := h.fs.sessionManager.CreateSession(h.fs.plugin.db, "", "")
+			if err != nil {
+				return err
+			}
+			h.readBuffer.WriteString(fmt.Sprintf("%d\n", session.id))
+			return nil
+		}
+
+		// For table-level ctl
+		if h.dbName != "" && h.tableName != "" {
+			// Check if table exists
+			exists, err := h.fs.tableExists(h.dbName, h.tableName)
+			if err != nil {
+				return fmt.Errorf("failed to check table existence: %w", err)
+			}
+			if !exists {
+				return fmt.Errorf("table '%s.%s' does not exist", h.dbName, h.tableName)
+			}
+
+			// Switch to database if needed
+			if err := h.fs.plugin.backend.SwitchDatabase(h.fs.plugin.db, h.dbName); err != nil {
+				return err
+			}
+
+			// Create new session
+			session, err := h.fs.sessionManager.CreateSession(h.fs.plugin.db, h.dbName, h.tableName)
+			if err != nil {
+				return err
+			}
+			h.readBuffer.WriteString(fmt.Sprintf("%d\n", session.id))
+			return nil
+		}
+
+		return fmt.Errorf("invalid path for ctl")
+
 	case "schema":
 		if h.dbName == "" || h.tableName == "" {
 			return fmt.Errorf("invalid path for schema")
@@ -1860,12 +2233,22 @@ func (h *SQLFileHandle) populateReadBuffer() error {
 		}
 		h.readBuffer.WriteString(fmt.Sprintf("%d\n", count))
 
-	case "query", "execute", "insert_json":
-		// These are write-only operations, but we can return empty
+	case "result":
+		// Result is read from session, but for handle-based access we need to get it from somewhere
+		// For now, return empty - the session-based Read handles this case
+		return nil
+
+	case "error":
+		// Error is read from session, but for handle-based access we need to get it from somewhere
+		// For now, return empty - the session-based Read handles this case
+		return nil
+
+	case "query", "data", "execute", "insert_json":
+		// These are write-only operations, return empty
 		return nil
 
 	default:
-		return fmt.Errorf("cannot read from directory")
+		return fmt.Errorf("unknown operation: %s", h.operation)
 	}
 
 	return nil
@@ -2259,6 +2642,15 @@ func (fs *sqlfs2FS) OpenHandle(path string, flags filesystem.OpenFlag, mode uint
 	// Only support handle operations on operation files
 	if operation == "" {
 		return nil, fmt.Errorf("cannot open handle on directory: %s", path)
+	}
+
+	// Session-related paths do not support HandleFS mode.
+	// The session model requires immediate SQL execution on write and reading results
+	// from the session state, which is incompatible with HandleFS's buffered I/O model.
+	// Return ErrNotSupported so FUSE falls back to using Read/Write methods directly.
+	if sid != "" {
+		log.Debugf("[sqlfs2] HandleFS not supported for session path: %s (use Read/Write instead)", path)
+		return nil, filesystem.ErrNotSupported
 	}
 
 	// Check if table exists for table-level operations
