@@ -13,6 +13,7 @@ import (
 	"github.com/c4pt0r/agfs/agfs-server/pkg/mountablefs"
 	"github.com/c4pt0r/agfs/agfs-server/pkg/plugin"
 	"github.com/c4pt0r/agfs/agfs-server/pkg/plugin/api"
+	"github.com/c4pt0r/agfs/agfs-server/pkg/plugins/gptfs"
 	"github.com/c4pt0r/agfs/agfs-server/pkg/plugins/heartbeatfs"
 	"github.com/c4pt0r/agfs/agfs-server/pkg/plugins/hellofs"
 	"github.com/c4pt0r/agfs/agfs-server/pkg/plugins/httpfs"
@@ -42,20 +43,21 @@ type PluginFactory func() plugin.ServicePlugin
 
 // availablePlugins maps plugin names to their factory functions
 var availablePlugins = map[string]PluginFactory{
-	"serverinfofs": func() plugin.ServicePlugin { return serverinfofs.NewServerInfoFSPlugin() },
-	"memfs":        func() plugin.ServicePlugin { return memfs.NewMemFSPlugin() },
-	"queuefs":      func() plugin.ServicePlugin { return queuefs.NewQueueFSPlugin() },
-	"kvfs":         func() plugin.ServicePlugin { return kvfs.NewKVFSPlugin() },
-	"hellofs":      func() plugin.ServicePlugin { return hellofs.NewHelloFSPlugin() },
-	"heartbeatfs":  func() plugin.ServicePlugin { return heartbeatfs.NewHeartbeatFSPlugin() },
-	"httpfs":       func() plugin.ServicePlugin { return httpfs.NewHTTPFSPlugin() },
-	"proxyfs":      func() plugin.ServicePlugin { return proxyfs.NewProxyFSPlugin("") },
-	"s3fs":         func() plugin.ServicePlugin { return s3fs.NewS3FSPlugin() },
+	"serverinfofs":   func() plugin.ServicePlugin { return serverinfofs.NewServerInfoFSPlugin() },
+	"memfs":          func() plugin.ServicePlugin { return memfs.NewMemFSPlugin() },
+	"queuefs":        func() plugin.ServicePlugin { return queuefs.NewQueueFSPlugin() },
+	"kvfs":           func() plugin.ServicePlugin { return kvfs.NewKVFSPlugin() },
+	"hellofs":        func() plugin.ServicePlugin { return hellofs.NewHelloFSPlugin() },
+	"heartbeatfs":    func() plugin.ServicePlugin { return heartbeatfs.NewHeartbeatFSPlugin() },
+	"httpfs":         func() plugin.ServicePlugin { return httpfs.NewHTTPFSPlugin() },
+	"proxyfs":        func() plugin.ServicePlugin { return proxyfs.NewProxyFSPlugin("") },
+	"s3fs":           func() plugin.ServicePlugin { return s3fs.NewS3FSPlugin() },
 	"streamfs":       func() plugin.ServicePlugin { return streamfs.NewStreamFSPlugin() },
 	"streamrotatefs": func() plugin.ServicePlugin { return streamrotatefs.NewStreamRotateFSPlugin() },
 	"sqlfs":          func() plugin.ServicePlugin { return sqlfs.NewSQLFSPlugin() },
 	"sqlfs2":         func() plugin.ServicePlugin { return sqlfs2.NewSQLFS2Plugin() },
 	"localfs":        func() plugin.ServicePlugin { return localfs.NewLocalFSPlugin() },
+	"gptfs":          func() plugin.ServicePlugin { return gptfs.NewGptfs() },
 }
 
 const sampleConfig = `# AGFS Server Configuration File

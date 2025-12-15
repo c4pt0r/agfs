@@ -40,3 +40,4 @@ build/
 # python staging files
 *.pyc
 __pycache__/
+.idea
