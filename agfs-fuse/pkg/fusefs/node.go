@@ -28,6 +28,8 @@ var _ = (fs.NodeRenamer)((*AGFSNode)(nil))
 var _ = (fs.NodeCreater)((*AGFSNode)(nil))
 var _ = (fs.NodeOpener)((*AGFSNode)(nil))
 var _ = (fs.NodeSetattrer)((*AGFSNode)(nil))
+var _ = (fs.NodeReadlinker)((*AGFSNode)(nil))
+var _ = (fs.NodeSymlinker)((*AGFSNode)(nil))
 
 // Getattr returns file attributes
 func (n *AGFSNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
@@ -284,6 +286,47 @@ func (n *AGFSNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAtt
 	return n.Getattr(ctx, f, out)
 }
 
+// Readlink reads the target of a symbolic link
+func (n *AGFSNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
+	target, err := n.root.client.Readlink(n.path)
+	if err != nil {
+		return nil, syscall.EIO
+	}
+	return []byte(target), 0
+}
+
+// Symlink creates a symbolic link
+func (n *AGFSNode) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	linkPath := filepath.Join(n.path, name)
+
+	err := n.root.client.Symlink(target, linkPath)
+	if err != nil {
+		return nil, syscall.EIO
+	}
+
+	// Invalidate caches
+	n.root.invalidateCache(linkPath)
+
+	// Fetch file info for the new symlink
+	info, err := n.root.client.Stat(linkPath)
+	if err != nil {
+		return nil, syscall.EIO
+	}
+
+	fillAttr(&out.Attr, info)
+
+	stable := fs.StableAttr{
+		Mode: getStableMode(info),
+	}
+
+	child := &AGFSNode{
+		root: n.root,
+		path: linkPath,
+	}
+
+	return n.NewInode(ctx, child, stable), 0
+}
+
 // fillAttr fills FUSE attributes from AGFS FileInfo
 func fillAttr(out *fuse.Attr, info *agfs.FileInfo) {
 	out.Mode = modeToFileMode(info.Mode)
@@ -299,7 +342,9 @@ func fillAttr(out *fuse.Attr, info *agfs.FileInfo) {
 	out.Uid = uint32(syscall.Getuid())
 	out.Gid = uint32(syscall.Getgid())
 
-	if info.IsDir {
+	if info.IsSymlink {
+		out.Mode |= syscall.S_IFLNK
+	} else if info.IsDir {
 		out.Mode |= syscall.S_IFDIR
 	} else {
 		out.Mode |= syscall.S_IFREG

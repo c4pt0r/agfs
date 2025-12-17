@@ -11,12 +11,13 @@ type MetaData struct {
 
 // FileInfo represents file metadata similar to os.FileInfo
 type FileInfo struct {
-	Name    string
-	Size    int64
-	Mode    uint32
-	ModTime time.Time
-	IsDir   bool
-	Meta    MetaData // Structured metadata for additional information
+	Name      string
+	Size      int64
+	Mode      uint32
+	ModTime   time.Time
+	IsDir     bool
+	IsSymlink bool     // True if this is a symbolic link
+	Meta      MetaData // Structured metadata for additional information
 }
 
 // OpenFlag represents file open flags

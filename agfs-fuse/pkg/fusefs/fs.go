@@ -120,7 +120,9 @@ func fileModeToMode(mode uint32) uint32 {
 // getStableMode returns mode with file type bits for StableAttr
 func getStableMode(info *agfs.FileInfo) uint32 {
 	mode := modeToFileMode(info.Mode)
-	if info.IsDir {
+	if info.IsSymlink {
+		mode |= syscall.S_IFLNK
+	} else if info.IsDir {
 		mode |= syscall.S_IFDIR
 	} else {
 		mode |= syscall.S_IFREG

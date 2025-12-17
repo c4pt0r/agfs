@@ -87,6 +87,21 @@ type FileInfoResponse struct {
 	Meta    MetaData `json:"meta,omitempty"`
 }
 
+// IsSymlink checks if the file info represents a symbolic link
+func (f *FileInfoResponse) IsSymlink() bool {
+	return f.Meta.Type == "symlink"
+}
+
+// SymlinkRequest represents a symlink creation request
+type SymlinkRequest struct {
+	Target string `json:"target"`
+}
+
+// ReadlinkResponse represents a readlink response
+type ReadlinkResponse struct {
+	Target string `json:"target"`
+}
+
 // ListResponse represents directory listing response from the API
 type ListResponse struct {
 	Files []FileInfoResponse `json:"files"`
@@ -361,12 +376,13 @@ func (c *Client) ReadDir(path string) ([]FileInfo, error) {
 	for _, f := range listResp.Files {
 		modTime, _ := time.Parse(time.RFC3339Nano, f.ModTime)
 		files = append(files, FileInfo{
-			Name:    f.Name,
-			Size:    f.Size,
-			Mode:    f.Mode,
-			ModTime: modTime,
-			IsDir:   f.IsDir,
-			Meta:    f.Meta,
+			Name:      f.Name,
+			Size:      f.Size,
+			Mode:      f.Mode,
+			ModTime:   modTime,
+			IsDir:     f.IsDir,
+			IsSymlink: f.IsSymlink(),
+			Meta:      f.Meta,
 		})
 	}
 
@@ -400,12 +416,13 @@ func (c *Client) Stat(path string) (*FileInfo, error) {
 	modTime, _ := time.Parse(time.RFC3339Nano, fileInfo.ModTime)
 
 	return &FileInfo{
-		Name:    fileInfo.Name,
-		Size:    fileInfo.Size,
-		Mode:    fileInfo.Mode,
-		ModTime: modTime,
-		IsDir:   fileInfo.IsDir,
-		Meta:    fileInfo.Meta,
+		Name:      fileInfo.Name,
+		Size:      fileInfo.Size,
+		Mode:      fileInfo.Mode,
+		ModTime:   modTime,
+		IsDir:     fileInfo.IsDir,
+		IsSymlink: fileInfo.IsSymlink(),
+		Meta:      fileInfo.Meta,
 	}, nil
 }
 
@@ -914,11 +931,61 @@ func (c *Client) StatHandle(handleID int64) (*FileInfo, error) {
 	modTime, _ := time.Parse(time.RFC3339Nano, fileInfo.ModTime)
 
 	return &FileInfo{
-		Name:    fileInfo.Name,
-		Size:    fileInfo.Size,
-		Mode:    fileInfo.Mode,
-		ModTime: modTime,
-		IsDir:   fileInfo.IsDir,
-		Meta:    fileInfo.Meta,
+		Name:      fileInfo.Name,
+		Size:      fileInfo.Size,
+		Mode:      fileInfo.Mode,
+		ModTime:   modTime,
+		IsDir:     fileInfo.IsDir,
+		IsSymlink: fileInfo.IsSymlink(),
+		Meta:      fileInfo.Meta,
 	}, nil
+}
+
+// Symlink creates a symbolic link at linkPath pointing to targetPath
+func (c *Client) Symlink(targetPath, linkPath string) error {
+	query := url.Values{}
+	query.Set("path", linkPath)
+
+	reqBody := SymlinkRequest{Target: targetPath}
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal symlink request: %w", err)
+	}
+
+	resp, err := c.doRequest(http.MethodPost, "/symlink", query, bytes.NewReader(jsonData))
+	if err != nil {
+		return err
+	}
+
+	return c.handleErrorResponse(resp)
+}
+
+// Readlink reads the target of a symbolic link
+func (c *Client) Readlink(linkPath string) (string, error) {
+	query := url.Values{}
+	query.Set("path", linkPath)
+
+	resp, err := c.doRequest(http.MethodGet, "/readlink", query, nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotImplemented {
+			return "", ErrNotSupported
+		}
+		var errResp ErrorResponse
+		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
+			return "", fmt.Errorf("HTTP %d: failed to decode error response", resp.StatusCode)
+		}
+		return "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, errResp.Error)
+	}
+
+	var readlinkResp ReadlinkResponse
+	if err := json.NewDecoder(resp.Body).Decode(&readlinkResp); err != nil {
+		return "", fmt.Errorf("failed to decode readlink response: %w", err)
+	}
+
+	return readlinkResp.Target, nil
 }
