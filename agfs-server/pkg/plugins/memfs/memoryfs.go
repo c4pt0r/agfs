@@ -411,6 +411,46 @@ func (mfs *MemoryFS) Chmod(path string, mode uint32) error {
 	return nil
 }
 
+// Truncate changes the size of the file
+func (mfs *MemoryFS) Truncate(path string, size int64) error {
+	mfs.mu.Lock()
+	defer mfs.mu.Unlock()
+
+	node, err := mfs.getNode(path)
+	if err != nil {
+		return err
+	}
+
+	if node.IsDir {
+		return fmt.Errorf("is a directory: %s", path)
+	}
+
+	currentSize := int64(len(node.Data))
+	if size == currentSize {
+		// No change needed
+		return nil
+	}
+
+	if size == 0 {
+		// Truncate to zero
+		node.Data = []byte{}
+	} else if size < currentSize {
+		// Shrink the file
+		node.Data = node.Data[:size]
+	} else {
+		// Extend the file with zeros
+		newData := make([]byte, size)
+		copy(newData, node.Data)
+		node.Data = newData
+	}
+
+	node.ModTime = time.Now()
+	return nil
+}
+
+// Ensure MemoryFS implements Truncater interface
+var _ filesystem.Truncater = (*MemoryFS)(nil)
+
 // memoryReadCloser wraps a bytes.Reader to implement io.ReadCloser
 type memoryReadCloser struct {
 	*bytes.Reader
@@ -797,4 +837,3 @@ func (mfs *MemoryFS) CloseHandle(id int64) error {
 
 // Ensure MemoryFS implements HandleFS interface
 var _ filesystem.HandleFS = (*MemoryFS)(nil)
-

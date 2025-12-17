@@ -682,7 +682,7 @@ func (mfs *MountableFS) ReadDir(path string) ([]filesystem.FileInfo, error) {
 	// Walk all keys that have this prefix
 	tree.Root().WalkPrefix([]byte(prefix), func(k []byte, v interface{}) bool {
 		mountPath := string(k)
-		
+
 		// Extract the next directory component
 		rel := strings.TrimPrefix(mountPath, prefix)
 		if rel == "" {
@@ -904,6 +904,21 @@ func (mfs *MountableFS) Chmod(path string, mode uint32) error {
 		return mount.Plugin.GetFileSystem().Chmod(relPath, mode)
 	}
 	return filesystem.NewNotFoundError("chmod", path)
+}
+
+// Truncate implements filesystem.Truncater interface
+func (mfs *MountableFS) Truncate(path string, size int64) error {
+	mount, relPath, found := mfs.findMount(path)
+
+	if !found {
+		return filesystem.NewNotFoundError("truncate", path)
+	}
+
+	fs := mount.Plugin.GetFileSystem()
+	if truncater, ok := fs.(filesystem.Truncater); ok {
+		return truncater.Truncate(relPath, size)
+	}
+	return fmt.Errorf("filesystem does not support truncate: %s", path)
 }
 
 // Touch implements filesystem.Toucher interface
@@ -1299,3 +1314,6 @@ func (mfs *MountableFS) Readlink(linkPath string) (string, error) {
 // Ensure MountableFS implements HandleFS interface
 var _ filesystem.HandleFS = (*MountableFS)(nil)
 var _ filesystem.FileHandle = (*globalFileHandle)(nil)
+
+// Ensure MountableFS implements Truncater interface
+var _ filesystem.Truncater = (*MountableFS)(nil)
