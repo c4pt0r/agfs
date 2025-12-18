@@ -950,7 +950,70 @@ func (fs *S3FS) OpenStream(path string) (filesystem.StreamReader, error) {
 	}, nil
 }
 
+// Truncate changes the size of the file
+// Since S3 is an object store, this requires reading, modifying, and rewriting the object
+func (fs *S3FS) Truncate(path string, size int64) error {
+	path = filesystem.NormalizeS3Key(path)
+	ctx := context.Background()
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	// Check if it's a directory
+	if strings.HasSuffix(path, "/") {
+		return fmt.Errorf("is a directory: %s", path)
+	}
+
+	// Check if file exists and get current content
+	exists, err := fs.client.ObjectExists(ctx, path)
+	if err != nil {
+		return fmt.Errorf("failed to check if file exists: %w", err)
+	}
+	if !exists {
+		return filesystem.ErrNotFound
+	}
+
+	// Read current content
+	data, err := fs.client.GetObject(ctx, path)
+	if err != nil {
+		return fmt.Errorf("failed to read file: %w", err)
+	}
+
+	currentSize := int64(len(data))
+	if size == currentSize {
+		// No change needed
+		return nil
+	}
+
+	var newData []byte
+	if size == 0 {
+		// Truncate to zero
+		newData = []byte{}
+	} else if size < currentSize {
+		// Shrink the file
+		newData = data[:size]
+	} else {
+		// Extend the file with zeros
+		newData = make([]byte, size)
+		copy(newData, data)
+	}
+
+	// Write back to S3
+	err = fs.client.PutObject(ctx, path, newData)
+	if err != nil {
+		return fmt.Errorf("failed to write truncated file: %w", err)
+	}
+
+	// Invalidate caches
+	parent := getParentPath(path)
+	fs.dirCache.Invalidate(parent)
+	fs.statCache.Invalidate(path)
+
+	return nil
+}
+
 // Ensure S3FSPlugin implements ServicePlugin
 var _ plugin.ServicePlugin = (*S3FSPlugin)(nil)
 var _ filesystem.FileSystem = (*S3FS)(nil)
 var _ filesystem.Streamer = (*S3FS)(nil)
+var _ filesystem.Truncater = (*S3FS)(nil)

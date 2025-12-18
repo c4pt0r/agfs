@@ -817,6 +817,37 @@ func (p *LocalFSPlugin) Shutdown() error {
 	return nil
 }
 
+// Truncate changes the size of the file
+func (fs *LocalFS) Truncate(path string, size int64) error {
+	localPath := fs.resolvePath(path)
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	// Check if file exists
+	info, err := os.Stat(localPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no such file: %s", path)
+		}
+		return fmt.Errorf("failed to stat: %w", err)
+	}
+
+	// Cannot truncate a directory
+	if info.IsDir() {
+		return fmt.Errorf("is a directory: %s", path)
+	}
+
+	// Truncate the file
+	err = os.Truncate(localPath, size)
+	if err != nil {
+		return fmt.Errorf("failed to truncate: %w", err)
+	}
+
+	return nil
+}
+
 // Ensure LocalFSPlugin implements ServicePlugin
 var _ plugin.ServicePlugin = (*LocalFSPlugin)(nil)
 var _ filesystem.FileSystem = (*LocalFS)(nil)
+var _ filesystem.Truncater = (*LocalFS)(nil)

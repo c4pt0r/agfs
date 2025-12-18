@@ -455,8 +455,175 @@ func TestLocalFSChmod(t *testing.T) {
 	}
 }
 
-// Note: Truncate, WriteAt, Sync, GetCapabilities, and Touch are optional extension interfaces
-// LocalFS may or may not implement them. These tests are skipped for now.
+// TestLocalFSTruncate tests the Truncate method
+func TestLocalFSTruncate(t *testing.T) {
+	dir, cleanup := setupTestDir(t)
+	defer cleanup()
+
+	fs := newTestFS(t, dir)
+	path := "/truncate_test.txt"
+
+	// Create file with initial content
+	_, err := fs.Write(path, []byte("Hello, World!"), -1, filesystem.WriteFlagCreate)
+	if err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	// Test 1: Truncate to zero
+	t.Run("TruncateToZero", func(t *testing.T) {
+		err := fs.Truncate(path, 0)
+		if err != nil {
+			t.Fatalf("Truncate to zero failed: %v", err)
+		}
+
+		content, err := readIgnoreEOF(fs, path)
+		if err != nil {
+			t.Fatalf("Read failed: %v", err)
+		}
+		if len(content) != 0 {
+			t.Errorf("Expected empty file, got %d bytes: %q", len(content), content)
+		}
+
+		info, _ := fs.Stat(path)
+		if info.Size != 0 {
+			t.Errorf("Expected size 0, got %d", info.Size)
+		}
+	})
+
+	// Test 2: Truncate to shrink file
+	t.Run("TruncateShrink", func(t *testing.T) {
+		// Write new content
+		_, err := fs.Write(path, []byte("Hello, World!"), -1, filesystem.WriteFlagTruncate)
+		if err != nil {
+			t.Fatalf("Write failed: %v", err)
+		}
+
+		// Truncate to 5 bytes ("Hello")
+		err = fs.Truncate(path, 5)
+		if err != nil {
+			t.Fatalf("Truncate shrink failed: %v", err)
+		}
+
+		content, err := readIgnoreEOF(fs, path)
+		if err != nil {
+			t.Fatalf("Read failed: %v", err)
+		}
+		if string(content) != "Hello" {
+			t.Errorf("Content mismatch: got %q, want %q", string(content), "Hello")
+		}
+	})
+
+	// Test 3: Truncate to extend file (pad with zeros)
+	t.Run("TruncateExtend", func(t *testing.T) {
+		// Write small content
+		_, err := fs.Write(path, []byte("Hi"), -1, filesystem.WriteFlagTruncate)
+		if err != nil {
+			t.Fatalf("Write failed: %v", err)
+		}
+
+		// Extend to 10 bytes
+		err = fs.Truncate(path, 10)
+		if err != nil {
+			t.Fatalf("Truncate extend failed: %v", err)
+		}
+
+		content, err := readIgnoreEOF(fs, path)
+		if err != nil {
+			t.Fatalf("Read failed: %v", err)
+		}
+		if len(content) != 10 {
+			t.Errorf("Expected 10 bytes, got %d", len(content))
+		}
+		// First 2 bytes should be "Hi", rest should be zero
+		if string(content[:2]) != "Hi" {
+			t.Errorf("First 2 bytes should be 'Hi', got %q", string(content[:2]))
+		}
+		for i := 2; i < 10; i++ {
+			if content[i] != 0 {
+				t.Errorf("Byte %d should be 0, got %d", i, content[i])
+			}
+		}
+	})
+
+	// Test 4: Truncate same size (no-op)
+	t.Run("TruncateSameSize", func(t *testing.T) {
+		_, err := fs.Write(path, []byte("Test"), -1, filesystem.WriteFlagTruncate)
+		if err != nil {
+			t.Fatalf("Write failed: %v", err)
+		}
+
+		err = fs.Truncate(path, 4)
+		if err != nil {
+			t.Fatalf("Truncate same size failed: %v", err)
+		}
+
+		content, err := readIgnoreEOF(fs, path)
+		if err != nil {
+			t.Fatalf("Read failed: %v", err)
+		}
+		if string(content) != "Test" {
+			t.Errorf("Content mismatch: got %q, want %q", string(content), "Test")
+		}
+	})
+
+	// Test 5: Truncate non-existent file should fail
+	t.Run("TruncateNonExistent", func(t *testing.T) {
+		err := fs.Truncate("/nonexistent.txt", 0)
+		if err == nil {
+			t.Error("Expected error for truncating non-existent file")
+		}
+	})
+
+	// Test 6: Truncate directory should fail
+	t.Run("TruncateDirectory", func(t *testing.T) {
+		err := fs.Mkdir("/testdir", 0755)
+		if err != nil {
+			t.Fatalf("Mkdir failed: %v", err)
+		}
+
+		err = fs.Truncate("/testdir", 0)
+		if err == nil {
+			t.Error("Expected error for truncating directory")
+		}
+	})
+}
+
+// TestLocalFSTruncateInterface verifies LocalFS implements Truncater interface
+func TestLocalFSTruncateInterface(t *testing.T) {
+	dir, cleanup := setupTestDir(t)
+	defer cleanup()
+
+	fs := newTestFS(t, dir)
+
+	// Verify interface implementation
+	var _ filesystem.Truncater = fs
+
+	// Also test via interface
+	truncater, ok := interface{}(fs).(filesystem.Truncater)
+	if !ok {
+		t.Fatal("LocalFS does not implement filesystem.Truncater")
+	}
+
+	// Create a file and truncate via interface
+	path := "/interface_test.txt"
+	_, err := fs.Write(path, []byte("Hello, World!"), -1, filesystem.WriteFlagCreate)
+	if err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	err = truncater.Truncate(path, 5)
+	if err != nil {
+		t.Fatalf("Truncate via interface failed: %v", err)
+	}
+
+	content, err := readIgnoreEOF(fs, path)
+	if err != nil {
+		t.Fatalf("Read failed: %v", err)
+	}
+	if string(content) != "Hello" {
+		t.Errorf("Content mismatch: got %q, want %q", string(content), "Hello")
+	}
+}
 
 func TestLocalFSOpenWrite(t *testing.T) {
 	dir, cleanup := setupTestDir(t)
