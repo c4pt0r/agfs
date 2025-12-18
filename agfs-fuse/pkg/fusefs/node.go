@@ -271,9 +271,20 @@ func (n *AGFSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fu
 
 // Setattr sets file attributes
 func (n *AGFSNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
-	// Only support chmod for now
+	// Handle chmod
 	if mode, ok := in.GetMode(); ok {
 		err := n.root.client.Chmod(n.path, mode)
+		if err != nil {
+			return syscall.EIO
+		}
+
+		// Invalidate cache
+		n.root.metaCache.Invalidate(n.path)
+	}
+
+	// Handle truncate (size change)
+	if size, ok := in.GetSize(); ok {
+		err := n.root.client.Truncate(n.path, int64(size))
 		if err != nil {
 			return syscall.EIO
 		}

@@ -464,6 +464,22 @@ func (c *Client) Chmod(path string, mode uint32) error {
 	return c.handleErrorResponse(resp)
 }
 
+// Truncate truncates a file to the specified size
+// For size=0, it clears the file content
+// For size>0, it either pads with zeros or truncates the content
+func (c *Client) Truncate(path string, size int64) error {
+	query := url.Values{}
+	query.Set("path", path)
+	query.Set("size", fmt.Sprintf("%d", size))
+
+	resp, err := c.doRequest(http.MethodPost, "/truncate", query, nil)
+	if err != nil {
+		return err
+	}
+
+	return c.handleErrorResponse(resp)
+}
+
 // Health checks the health of the AGFS server
 func (c *Client) Health() error {
 	resp, err := c.doRequest(http.MethodGet, "/health", nil, nil)

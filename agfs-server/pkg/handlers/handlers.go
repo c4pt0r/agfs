@@ -689,6 +689,47 @@ func (h *Handler) Readlink(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ReadlinkResponse{Target: target})
 }
 
+// Truncate handles POST /truncate?path=<path>&size=<size>
+func (h *Handler) Truncate(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		writeError(w, http.StatusBadRequest, "path parameter is required")
+		return
+	}
+
+	sizeStr := r.URL.Query().Get("size")
+	if sizeStr == "" {
+		writeError(w, http.StatusBadRequest, "size parameter is required")
+		return
+	}
+
+	size, err := strconv.ParseInt(sizeStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid size parameter")
+		return
+	}
+
+	if size < 0 {
+		writeError(w, http.StatusBadRequest, "size must be non-negative")
+		return
+	}
+
+	// Check if filesystem supports Truncate
+	truncater, ok := h.fs.(filesystem.Truncater)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "filesystem does not support truncate")
+		return
+	}
+
+	if err := truncater.Truncate(path, size); err != nil {
+		status := mapErrorToStatus(err)
+		writeError(w, status, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, SuccessResponse{Message: "truncated"})
+}
+
 // SetupRoutes sets up all HTTP routes with /api/v1 prefix
 func (h *Handler) SetupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/health", h.Health)
@@ -749,6 +790,13 @@ func (h *Handler) SetupRoutes(mux *http.ServeMux) {
 			return
 		}
 		h.Chmod(w, r)
+	})
+	mux.HandleFunc("/api/v1/truncate", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		h.Truncate(w, r)
 	})
 	mux.HandleFunc("/api/v1/grep", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

@@ -352,6 +352,29 @@ class AGFSClient:
         except Exception as e:
             self._handle_request_error(e)
 
+    def truncate(self, path: str, size: int) -> Dict[str, Any]:
+        """Truncate file to specified size
+        
+        Args:
+            path: File path
+            size: Target size in bytes. If size is less than current size,
+                  extra data is discarded. If size is greater, file is 
+                  extended with null bytes.
+        
+        Returns:
+            Response dict with message
+        """
+        try:
+            response = self.session.post(
+                f"{self.api_base}/truncate",
+                params={"path": path, "size": str(size)},
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            self._handle_request_error(e)
+
     def touch(self, path: str) -> Dict[str, Any]:
         """Touch a file (update timestamp by writing empty content)"""
         try:
@@ -836,6 +859,27 @@ class AGFSClient:
         except Exception as e:
             self._handle_request_error(e)
 
+    def handle_truncate(self, handle_id: int, size: int) -> Dict[str, Any]:
+        """Truncate file via handle
+
+        Args:
+            handle_id: The handle ID (int64)
+            size: Target size in bytes
+
+        Returns:
+            Response dict with message
+        """
+        try:
+            response = self.session.post(
+                f"{self.api_base}/handles/{handle_id}/truncate",
+                params={"size": str(size)},
+                timeout=self.timeout
+            )
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            self._handle_request_error(e)
+
     def renew_handle(self, handle_id: int, lease: int = 60) -> Dict[str, Any]:
         """Renew the lease on a file handle
 
@@ -1025,6 +1069,16 @@ class FileHandle:
         if self._closed:
             raise AGFSClientError("Handle is closed")
         return self._client.renew_handle(self._handle_id, lease)
+
+    def truncate(self, size: int) -> None:
+        """Truncate file to specified size
+
+        Args:
+            size: Target size in bytes
+        """
+        if self._closed:
+            raise AGFSClientError("Handle is closed")
+        self._client.handle_truncate(self._handle_id, size)
 
     def close(self) -> None:
         """Close the handle"""
