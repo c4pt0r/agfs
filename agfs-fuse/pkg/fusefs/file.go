@@ -38,7 +38,8 @@ func (fh *AGFSFileHandle) Write(ctx context.Context, data []byte, off int64) (wr
 	}
 
 	// Invalidate metadata cache since file size may have changed
-	fh.node.root.metaCache.Invalidate(fh.node.path)
+	path := fh.node.getPath()
+	fh.node.root.metaCache.Invalidate(path)
 
 	return uint32(n), 0
 }

@@ -18,6 +18,33 @@ type AGFSNode struct {
 	path string
 }
 
+// getPath returns the full path of this node by walking up the inode tree
+func (n *AGFSNode) getPath() string {
+	// Build path by walking up the inode tree
+	var pathComponents []string
+	current := &n.Inode
+
+	for current != nil {
+		name, parent := current.Parent()
+		if parent == nil {
+			// We've reached the root
+			break
+		}
+
+		if name != "" {
+			pathComponents = append([]string{name}, pathComponents...)
+		}
+
+		current = parent
+	}
+
+	if len(pathComponents) == 0 {
+		return "/"
+	}
+
+	return "/" + filepath.Join(pathComponents...)
+}
+
 var _ = (fs.NodeGetattrer)((*AGFSNode)(nil))
 var _ = (fs.NodeLookuper)((*AGFSNode)(nil))
 var _ = (fs.NodeReaddirer)((*AGFSNode)(nil))
@@ -33,21 +60,23 @@ var _ = (fs.NodeSymlinker)((*AGFSNode)(nil))
 
 // Getattr returns file attributes
 func (n *AGFSNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	path := n.getPath()
+
 	// Try cache first
-	if cached, ok := n.root.metaCache.Get(n.path); ok {
+	if cached, ok := n.root.metaCache.Get(path); ok {
 		fillAttr(&out.Attr, cached)
 		out.SetTimeout(n.root.cacheTTL)
 		return 0
 	}
 
 	// Fetch from server
-	info, err := n.root.client.Stat(n.path)
+	info, err := n.root.client.Stat(path)
 	if err != nil {
 		return syscall.ENOENT
 	}
 
 	// Cache the result
-	n.root.metaCache.Set(n.path, info)
+	n.root.metaCache.Set(path, info)
 
 	fillAttr(&out.Attr, info)
 
@@ -56,7 +85,8 @@ func (n *AGFSNode) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrO
 
 // Lookup looks up a child node
 func (n *AGFSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	childPath := filepath.Join(n.path, name)
+	path := n.getPath()
+	childPath := filepath.Join(path, name)
 
 	// Try cache first
 	var info *agfs.FileInfo
@@ -90,19 +120,21 @@ func (n *AGFSNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 
 // Readdir reads directory contents
 func (n *AGFSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	path := n.getPath()
+
 	// Try cache first
 	var files []agfs.FileInfo
-	if cached, ok := n.root.dirCache.Get(n.path); ok {
+	if cached, ok := n.root.dirCache.Get(path); ok {
 		files = cached
 	} else {
 		// Fetch from server
 		var err error
-		files, err = n.root.client.ReadDir(n.path)
+		files, err = n.root.client.ReadDir(path)
 		if err != nil {
 			return nil, syscall.EIO
 		}
 		// Cache the result
-		n.root.dirCache.Set(n.path, files)
+		n.root.dirCache.Set(path, files)
 	}
 
 	// Convert to FUSE entries
@@ -120,7 +152,8 @@ func (n *AGFSNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 
 // Mkdir creates a directory
 func (n *AGFSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	childPath := filepath.Join(n.path, name)
+	path := n.getPath()
+	childPath := filepath.Join(path, name)
 
 	err := n.root.client.Mkdir(childPath, mode)
 	if err != nil {
@@ -152,7 +185,8 @@ func (n *AGFSNode) Mkdir(ctx context.Context, name string, mode uint32, out *fus
 
 // Rmdir removes a directory
 func (n *AGFSNode) Rmdir(ctx context.Context, name string) syscall.Errno {
-	childPath := filepath.Join(n.path, name)
+	path := n.getPath()
+	childPath := filepath.Join(path, name)
 
 	err := n.root.client.Remove(childPath)
 	if err != nil {
@@ -167,7 +201,8 @@ func (n *AGFSNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 
 // Unlink removes a file
 func (n *AGFSNode) Unlink(ctx context.Context, name string) syscall.Errno {
-	childPath := filepath.Join(n.path, name)
+	path := n.getPath()
+	childPath := filepath.Join(path, name)
 
 	err := n.root.client.Remove(childPath)
 	if err != nil {
@@ -182,14 +217,21 @@ func (n *AGFSNode) Unlink(ctx context.Context, name string) syscall.Errno {
 
 // Rename renames a file or directory
 func (n *AGFSNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
-	oldPath := filepath.Join(n.path, name)
+	path := n.getPath()
+	oldPath := filepath.Join(path, name)
 
 	// Get new parent path
-	newParentNode, ok := newParent.(*AGFSNode)
-	if !ok {
+	var newParentPath string
+	if _, ok := newParent.(*AGFSFS); ok {
+		// New parent is root
+		newParentPath = "/"
+	} else if newParentNode, ok := newParent.(*AGFSNode); ok {
+		// New parent is a regular node
+		newParentPath = newParentNode.getPath()
+	} else {
 		return syscall.EINVAL
 	}
-	newPath := filepath.Join(newParentNode.path, newName)
+	newPath := filepath.Join(newParentPath, newName)
 
 	err := n.root.client.Rename(oldPath, newPath)
 	if err != nil {
@@ -205,7 +247,8 @@ func (n *AGFSNode) Rename(ctx context.Context, name string, newParent fs.InodeEm
 
 // Create creates a new file
 func (n *AGFSNode) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (node *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
-	childPath := filepath.Join(n.path, name)
+	path := n.getPath()
+	childPath := filepath.Join(path, name)
 
 	// Create the file
 	err := n.root.client.Create(childPath)
@@ -253,8 +296,9 @@ func (n *AGFSNode) Create(ctx context.Context, name string, flags uint32, mode u
 
 // Open opens a file
 func (n *AGFSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	path := n.getPath()
 	openFlags := convertOpenFlags(flags)
-	fuseHandle, err := n.root.handles.Open(n.path, openFlags, 0644)
+	fuseHandle, err := n.root.handles.Open(path, openFlags, 0644)
 	if err != nil {
 		return nil, 0, syscall.EIO
 	}
@@ -271,26 +315,28 @@ func (n *AGFSNode) Open(ctx context.Context, flags uint32) (fh fs.FileHandle, fu
 
 // Setattr sets file attributes
 func (n *AGFSNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	path := n.getPath()
+
 	// Handle chmod
 	if mode, ok := in.GetMode(); ok {
-		err := n.root.client.Chmod(n.path, mode)
+		err := n.root.client.Chmod(path, mode)
 		if err != nil {
 			return syscall.EIO
 		}
 
 		// Invalidate cache
-		n.root.metaCache.Invalidate(n.path)
+		n.root.metaCache.Invalidate(path)
 	}
 
 	// Handle truncate (size change)
 	if size, ok := in.GetSize(); ok {
-		err := n.root.client.Truncate(n.path, int64(size))
+		err := n.root.client.Truncate(path, int64(size))
 		if err != nil {
 			return syscall.EIO
 		}
 
 		// Invalidate cache
-		n.root.metaCache.Invalidate(n.path)
+		n.root.metaCache.Invalidate(path)
 	}
 
 	// Return updated attributes
@@ -299,7 +345,8 @@ func (n *AGFSNode) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAtt
 
 // Readlink reads the target of a symbolic link
 func (n *AGFSNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
-	target, err := n.root.client.Readlink(n.path)
+	path := n.getPath()
+	target, err := n.root.client.Readlink(path)
 	if err != nil {
 		return nil, syscall.EIO
 	}
@@ -308,7 +355,8 @@ func (n *AGFSNode) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 
 // Symlink creates a symbolic link
 func (n *AGFSNode) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	linkPath := filepath.Join(n.path, name)
+	path := n.getPath()
+	linkPath := filepath.Join(path, name)
 
 	err := n.root.client.Symlink(target, linkPath)
 	if err != nil {
