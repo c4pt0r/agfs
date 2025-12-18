@@ -4,7 +4,7 @@ requires-python = ">=3.10"
 
 [[package]]
 name = "agfs-mcp"
-version = "1.0.0"
+version = "1.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
@@ -455,7 +455,7 @@ wheels = [
 
 [[package]]
 name = "pyagfs"
-version = "0.1.3"
+version = "1.4.0"
 source = { editable = "../agfs-sdk/python" }
 dependencies = [
     { name = "requests" },

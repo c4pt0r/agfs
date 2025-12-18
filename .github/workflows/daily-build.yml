@@ -141,6 +141,44 @@ jobs:
             build/agfs-shell-${{ matrix.os }}-${{ matrix.arch }}.zip
           retention-days: 90
 
+  docker-build:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Get version info
+        id: version
+        run: |
+          echo "date=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
+          echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./agfs-server/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/agfs:nightly
+            ${{ secrets.DOCKERHUB_USERNAME }}/agfs:nightly-${{ steps.version.outputs.date }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/agfs:nightly-${{ steps.version.outputs.short_sha }}
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   create-release:
     name: Create Daily Release
     needs: build
