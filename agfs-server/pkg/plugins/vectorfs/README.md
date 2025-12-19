@@ -34,10 +34,12 @@ VectorFS provides semantic search capabilities for documents by combining:
       subfolder/            - Subdirectory (virtual)
         file2.txt           - Nested document
         deep/file3.txt      - Deeply nested document
-    .indexing               - Indexing status (virtual file)
+    .indexing               - Indexing status (virtual file, read-only)
 ```
 
-**Note**: Subdirectories under `docs/` are virtual - they don't need to be created explicitly. Just write files with paths like `docs/guides/tutorial.txt` and the directory structure is maintained in metadata.
+**Note**:
+- Subdirectories under `docs/` are virtual - they don't need to be created explicitly. Just write files with paths like `docs/guides/tutorial.txt` and the directory structure is maintained in metadata.
+- The `.indexing` file is a virtual read-only status file. Currently returns "idle" as a placeholder. Future versions will show real-time worker pool status.
 
 ## Configuration
 
@@ -203,10 +205,21 @@ getting-started.md
 
 ### 6. Check Indexing Status
 
+Each namespace has a virtual `.indexing` file that shows background indexing status:
+
 ```bash
 agfs:/> cat /vectorfs/my_project/.indexing
 idle
 ```
+
+**Current Status**: This file currently returns `idle` as a placeholder. Since indexing happens asynchronously in a worker pool, documents may still be processing in the background even when showing "idle".
+
+**Future Enhancement**: Will show real-time worker pool statistics:
+- Queue depth (pending documents)
+- Active workers processing
+- Indexing rate and completion status
+
+**Note**: With async indexing, there may be a short delay (typically 1-15 seconds depending on file size) between writing a file and it being searchable. Large files (>20KB) with many chunks take longer to index.
 
 ## Architecture
 
@@ -325,7 +338,10 @@ CREATE TABLE tbl_chunks_<namespace> (
 
 4. **TiFlash Required**: TiDB Cloud cluster must have TiFlash enabled for vector search.
 
-5. **Indexing Visibility**: No API to check if a specific file has been indexed yet (async indexing means slight delay).
+5. **Indexing Visibility**: The `.indexing` status file is currently a placeholder (always shows "idle"). No API yet to check:
+   - Whether a specific file has been indexed
+   - Real-time queue depth or worker status
+   - Indexing progress or completion percentage
 
 ## Troubleshooting
 
@@ -349,6 +365,14 @@ CREATE TABLE tbl_chunks_<namespace> (
 - Check TiFlash is enabled on TiDB Cloud cluster
 - Try broader search queries
 
+### "file not appearing in search results immediately"
+- Indexing happens asynchronously in background worker pool
+- Small files (< 5KB): typically indexed within 1-3 seconds
+- Large files (> 20KB): may take 10-15+ seconds to complete indexing
+- Check server logs for indexing completion: `grep "Successfully indexed" /var/log/agfs.log`
+- The `.indexing` status file currently doesn't show real-time status (placeholder)
+- Workaround: Wait a few seconds after writing, then search again
+
 ## Example: Complete Workflow
 
 ```bash
@@ -370,12 +394,13 @@ grep "container management" /vectorfs/tech_docs/docs
 
 ## Future Enhancements
 
+- [ ] Real-time indexing status in `.indexing` file (queue depth, active workers, completion %)
+- [ ] Per-file indexing status API (check if specific file has been indexed)
 - [ ] Document update/delete operations
 - [ ] Multiple embedding providers (Cohere, Hugging Face, etc.)
 - [ ] Hybrid search (vector + keyword)
 - [ ] Metadata filtering in search
 - [ ] Configurable top-K results
-- [ ] Indexing progress API (check completion status)
 - [ ] Re-indexing support
 - [ ] Priority queue for indexing tasks
 

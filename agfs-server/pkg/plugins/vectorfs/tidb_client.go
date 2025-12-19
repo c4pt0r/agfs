@@ -25,6 +25,7 @@ type FileMetadata struct {
 	FileDigest string
 	FileName   string
 	S3Key      string
+	FileSize   int64
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 }
@@ -80,17 +81,28 @@ func sanitizeTableName(namespace string) string {
 	return replacer.Replace(namespace)
 }
 
-// CreateNamespace creates tables for a new namespace
+// CreateNamespace creates tables for a new namespace (fails if already exists)
 func (c *TiDBClient) CreateNamespace(namespace string, embeddingDim int) error {
 	tableSuffix := sanitizeTableName(namespace)
+	metaTable := fmt.Sprintf("tbl_meta_%s", tableSuffix)
+	chunksTable := fmt.Sprintf("tbl_chunks_%s", tableSuffix)
+
+	// Check if namespace already exists
+	exists, err := c.NamespaceExists(namespace)
+	if err != nil {
+		return fmt.Errorf("failed to check namespace existence: %w", err)
+	}
+	if exists {
+		return fmt.Errorf("namespace already exists: %s", namespace)
+	}
 
 	// Create metadata table
-	metaTable := fmt.Sprintf("tbl_meta_%s", tableSuffix)
 	createMetaSQL := fmt.Sprintf(`
-		CREATE TABLE IF NOT EXISTS %s (
+		CREATE TABLE %s (
 			file_digest VARCHAR(64) PRIMARY KEY,
 			file_name VARCHAR(1024) NOT NULL,
 			s3_key VARCHAR(1024) NOT NULL,
+			file_size BIGINT NOT NULL DEFAULT 0,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
 			INDEX idx_file_name (file_name)
@@ -102,9 +114,8 @@ func (c *TiDBClient) CreateNamespace(namespace string, embeddingDim int) error {
 	}
 
 	// Create chunks table with vector index
-	chunksTable := fmt.Sprintf("tbl_chunks_%s", tableSuffix)
 	createChunksSQL := fmt.Sprintf(`
-		CREATE TABLE IF NOT EXISTS %s (
+		CREATE TABLE %s (
 			chunk_id BIGINT AUTO_INCREMENT PRIMARY KEY,
 			file_digest VARCHAR(64) NOT NULL,
 			chunk_index INT NOT NULL,
@@ -121,6 +132,26 @@ func (c *TiDBClient) CreateNamespace(namespace string, embeddingDim int) error {
 	}
 
 	log.Infof("[vectorfs/tidb] Created tables for namespace: %s", namespace)
+	return nil
+}
+
+// DeleteNamespace drops all tables for a namespace
+func (c *TiDBClient) DeleteNamespace(namespace string) error {
+	tableSuffix := sanitizeTableName(namespace)
+	metaTable := fmt.Sprintf("tbl_meta_%s", tableSuffix)
+	chunksTable := fmt.Sprintf("tbl_chunks_%s", tableSuffix)
+
+	// Drop chunks table first (has foreign key reference)
+	if _, err := c.db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", chunksTable)); err != nil {
+		return fmt.Errorf("failed to drop chunks table: %w", err)
+	}
+
+	// Drop metadata table
+	if _, err := c.db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", metaTable)); err != nil {
+		return fmt.Errorf("failed to drop metadata table: %w", err)
+	}
+
+	log.Infof("[vectorfs/tidb] Deleted tables for namespace: %s", namespace)
 	return nil
 }
 
@@ -197,15 +228,16 @@ func (c *TiDBClient) InsertFileMetadata(namespace string, meta FileMetadata) err
 	metaTable := fmt.Sprintf("tbl_meta_%s", tableSuffix)
 
 	query := fmt.Sprintf(`
-		INSERT INTO %s (file_digest, file_name, s3_key, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO %s (file_digest, file_name, s3_key, file_size, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			file_name = VALUES(file_name),
 			s3_key = VALUES(s3_key),
+			file_size = VALUES(file_size),
 			updated_at = VALUES(updated_at)
 	`, metaTable)
 
-	_, err := c.db.Exec(query, meta.FileDigest, meta.FileName, meta.S3Key,
+	_, err := c.db.Exec(query, meta.FileDigest, meta.FileName, meta.S3Key, meta.FileSize,
 		meta.CreatedAt, meta.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("failed to insert file metadata: %w", err)
@@ -293,7 +325,7 @@ func (c *TiDBClient) ListFiles(namespace string) ([]FileMetadata, error) {
 	metaTable := fmt.Sprintf("tbl_meta_%s", tableSuffix)
 
 	query := fmt.Sprintf(`
-		SELECT file_digest, file_name, s3_key, created_at, updated_at
+		SELECT file_digest, file_name, s3_key, file_size, created_at, updated_at
 		FROM %s
 		ORDER BY updated_at DESC
 	`, metaTable)
@@ -307,7 +339,7 @@ func (c *TiDBClient) ListFiles(namespace string) ([]FileMetadata, error) {
 	var files []FileMetadata
 	for rows.Next() {
 		var file FileMetadata
-		if err := rows.Scan(&file.FileDigest, &file.FileName, &file.S3Key,
+		if err := rows.Scan(&file.FileDigest, &file.FileName, &file.S3Key, &file.FileSize,
 			&file.CreatedAt, &file.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -345,7 +377,7 @@ func (c *TiDBClient) GetFileMetadataByName(namespace, fileName string) (*FileMet
 	metaTable := fmt.Sprintf("tbl_meta_%s", tableSuffix)
 
 	query := fmt.Sprintf(`
-		SELECT file_digest, file_name, s3_key, created_at, updated_at
+		SELECT file_digest, file_name, s3_key, file_size, created_at, updated_at
 		FROM %s
 		WHERE file_name = ?
 		LIMIT 1
@@ -356,6 +388,7 @@ func (c *TiDBClient) GetFileMetadataByName(namespace, fileName string) (*FileMet
 		&meta.FileDigest,
 		&meta.FileName,
 		&meta.S3Key,
+		&meta.FileSize,
 		&meta.CreatedAt,
 		&meta.UpdatedAt,
 	)

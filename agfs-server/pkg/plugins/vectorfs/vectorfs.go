@@ -403,11 +403,26 @@ func (vfs *vectorFS) Mkdir(path string, perm uint32) error {
 }
 
 func (vfs *vectorFS) Remove(path string) error {
-	return fmt.Errorf("remove not supported in vectorfs")
+	return fmt.Errorf("remove not supported in vectorfs (use rm -r to delete entire namespace)")
 }
 
 func (vfs *vectorFS) RemoveAll(path string) error {
-	return fmt.Errorf("removeAll not supported in vectorfs")
+	namespace, relativePath, err := parsePath(path)
+	if err != nil {
+		return err
+	}
+
+	// Only allow removing entire namespace (not subdirectories)
+	if relativePath != "" {
+		return fmt.Errorf("can only remove entire namespace, not subdirectories (path: %s)", path)
+	}
+
+	if namespace == "" {
+		return fmt.Errorf("cannot remove root directory")
+	}
+
+	// Delete the namespace (drops all tables)
+	return vfs.plugin.tidbClient.DeleteNamespace(namespace)
 }
 
 func (vfs *vectorFS) Read(path string, offset int64, size int64) ([]byte, error) {
@@ -578,7 +593,7 @@ func (vfs *vectorFS) ReadDir(path string) ([]filesystem.FileInfo, error) {
 		for _, f := range files {
 			fileInfos = append(fileInfos, filesystem.FileInfo{
 				Name:    f.FileName,
-				Size:    0, // Size not stored
+				Size:    f.FileSize,
 				Mode:    0644,
 				ModTime: f.UpdatedAt,
 				IsDir:   false,

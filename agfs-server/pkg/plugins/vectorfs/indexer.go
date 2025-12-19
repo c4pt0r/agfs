@@ -62,6 +62,7 @@ func (idx *Indexer) IndexDocument(namespace, digest, fileName, content string) e
 		FileDigest: digest,
 		FileName:   fileName,
 		S3Key:      s3Key,
+		FileSize:   int64(len(content)),
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
