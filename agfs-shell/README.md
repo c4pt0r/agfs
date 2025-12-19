@@ -43,13 +43,13 @@ agfs-shell is a lightweight, educational shell that demonstrates Unix pipeline c
 **Key Features:**
 - Unix-style pipelines and redirection
 - Full scripting support with control flow
-- User-defined functions with local variables (with some limitations)
+- User-defined functions with local variables and recursion support
 - AGFS integration for distributed file operations
 - Tab completion and command history
 - AI-powered command (llm integration)
 - Pure Python implementation (no subprocess for builtins)
 
-**Note:** This is an educational shell implementation. Advanced features like recursive functions require a full call stack implementation (future work).
+**Note:** This is an educational shell implementation with full scripting capabilities including recursive functions and nested command substitution.
 
 ## Features
 
@@ -62,7 +62,7 @@ agfs-shell is a lightweight, educational shell that demonstrates Unix pipeline c
 - **Command Substitution**: `$(command)` or backticks
 - **Glob Expansion**: `*.txt`, `file?.dat`, `[abc]`
 - **Control Flow**: `if/then/elif/else/fi` and `for/in/do/done`
-- **Functions**: User-defined functions with parameters, local variables, and return values (non-recursive)
+- **Functions**: User-defined functions with parameters, local variables, return values, and recursion
 - **Comments**: `#` and `//` style comments
 
 ### Built-in Commands (42+)
@@ -544,27 +544,35 @@ calculate() {
 calculate 5 3            # Sum: 8, Product: 15
 ```
 
-**Known Limitations:**
+**Recursive Functions:**
 
 ```bash
-# ⚠️  Command substitution with functions has limited support
-# Simple cases work, but complex scenarios may not capture output correctly
-
-# ✓ This works
-simple_func() { echo "hello"; }
-result=$(simple_func)    # result="hello"
-
-# ✗ Recursive functions don't work (requires call stack implementation)
+# Recursive functions are fully supported
 factorial() {
     if [ $1 -le 1 ]; then
         echo 1
     else
-        local prev=$(factorial $(($1 - 1)))  # ⚠️  Recursion not supported
+        local prev=$(factorial $(($1 - 1)))
         echo $(($1 * prev))
     fi
 }
 
-# Workaround: Use iterative approaches instead of recursion
+result=$(factorial 5)
+echo "factorial(5) = $result"  # Output: factorial(5) = 120
+
+# Fibonacci example
+fib() {
+    if [ $1 -le 1 ]; then
+        echo $1
+    else
+        local a=$(fib $(($1 - 1)))
+        local b=$(fib $(($1 - 2)))
+        echo $((a + b))
+    fi
+}
+
+result=$(fib 7)
+echo "fib(7) = $result"  # Output: fib(7) = 13
 ```
 
 ### Heredoc
@@ -1921,43 +1929,41 @@ export AGFS_TIMEOUT=60
 uv run agfs-shell --timeout 60
 ```
 
-## Technical Limitations
+## Technical Notes
 
 ### Function Implementation
 
-The current function implementation supports:
-- ✅ Function definition and direct calls
-- ✅ Parameters (`$1`, `$2`, `$@`, etc.)
-- ✅ Local variables with `local` command
-- ✅ Return values with `return` command
-- ✅ Control flow (`if`, `for`) inside functions
-- ✅ Arithmetic expressions with local variables
+The function implementation supports:
+- Function definition and direct calls
+- Parameters (`$1`, `$2`, `$@`, etc.)
+- Local variables with `local` command
+- Return values with `return` command
+- Control flow (`if`, `for`) inside functions
+- Arithmetic expressions with local variables
+- Recursive functions with command substitution
+- Nested command substitutions
 
-**Known Limitations:**
-- ⚠️  **Command substitution with functions**: Limited support due to output capture architecture
-- ❌ **Recursive functions**: Requires full call stack implementation (future enhancement)
-- ❌ **Complex nested command substitutions**: May not capture output correctly
+**Example - Recursive Factorial:**
 
-**Why these limitations exist:**
+```bash
+factorial() {
+    if [ $1 -le 1 ]; then
+        echo 1
+    else
+        local prev=$(factorial $(($1 - 1)))
+        echo $(($1 * prev))
+    fi
+}
 
-The shell's current architecture executes commands through a Process/Pipeline system where each process has its own I/O streams. Capturing function output in command substitution contexts requires either:
+result=$(factorial 5)
+echo "factorial(5) = $result"  # Output: factorial(5) = 120
+```
 
-1. **Call Stack Implementation** (like real programming languages):
-   - Each function call gets its own execution frame
-   - Frames contain local variables, parameters, and output buffer
-   - Proper stack unwinding for recursion
+**Example - Nested Command Substitution:**
 
-2. **Unified Output Capture**:
-   - Refactor `execute()` to support optional output capture mode
-   - All Process objects write to configurable output streams
-   - Capture and restore output contexts across call chain
-
-These are planned for Phase 2 of the implementation.
-
-**Workarounds:**
-- Use direct function calls instead of command substitution when possible
-- Use iterative approaches instead of recursion
-- Store results in global variables if needed
+```bash
+echo "Triple nested: $(echo $(echo $(echo hello)))"  # Output: Triple nested: hello
+```
 
 ## Contributing
 
@@ -1969,10 +1975,9 @@ This is an experimental/educational project. Contributions welcome!
 4. Submit a pull request
 
 **Areas for Contribution:**
-- Implement full call stack for recursive functions
-- Improve output capture mechanism
 - Add more built-in commands
 - Enhance error handling
+- Improve performance
 
 ## License
 
