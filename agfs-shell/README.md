@@ -71,7 +71,7 @@ agfs-shell is a lightweight, educational shell that demonstrates Unix pipeline c
 - **Path Utilities**: basename, dirname
 - **Variables**: export, env, unset, local
 - **Testing**: test, [ ]
-- **Control Flow**: break, continue, exit, return, true, false
+- **Control Flow**: break, continue, exit, return, true, false, source, .
 - **Utilities**: sleep, date, plugins, mount, help
 - **AI**: llm (LLM integration)
 - **Operators**: `&&` (AND), `||` (OR) for conditional command execution
@@ -1130,6 +1130,36 @@ is_valid 5
 if [ $? -eq 0 ]; then
     echo "Valid number"
 fi
+```
+
+#### source FILENAME [ARGUMENTS...]
+#### . FILENAME [ARGUMENTS...]
+Execute commands from a file in the current shell environment.
+
+Variables and functions defined in the sourced file persist after execution.
+This is equivalent to Bash's `source` or `.` command.
+
+```bash
+# Create a library file
+cat << 'EOF' > /local/tmp/lib.sh
+MY_VAR=hello
+greet() {
+    echo "Hello, $1!"
+}
+EOF
+
+# Source the library
+source /local/tmp/lib.sh
+# Or using the dot syntax:
+. /local/tmp/lib.sh
+
+# Now variables and functions are available
+echo $MY_VAR           # Output: hello
+greet World            # Output: Hello, World!
+
+# Pass arguments to sourced script
+source /local/tmp/script.sh arg1 arg2
+# Inside script.sh: $1=arg1, $2=arg2
 ```
 
 ### AGFS Management

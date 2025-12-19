@@ -6,8 +6,6 @@ import argparse
 from .shell import Shell
 from .config import Config
 from .exit_codes import (
-    EXIT_CODE_CONTINUE,
-    EXIT_CODE_BREAK,
     EXIT_CODE_FOR_LOOP_NEEDED,
     EXIT_CODE_WHILE_LOOP_NEEDED,
     EXIT_CODE_IF_STATEMENT_NEEDED,
@@ -19,6 +17,8 @@ from .exit_codes import (
 def execute_agfs_script(shell, agfs_path, script_args=None, silent=False):
     """Execute a script file from AGFS filesystem line by line
 
+    This is a wrapper around shell.execute_script() for backward compatibility.
+
     Args:
         shell: Shell instance
         agfs_path: Path to script file in AGFS
@@ -28,192 +28,7 @@ def execute_agfs_script(shell, agfs_path, script_args=None, silent=False):
     Returns:
         Exit code from script execution, or None if file not found
     """
-    # Check if file exists in AGFS
-    try:
-        if not shell.filesystem.file_exists(agfs_path):
-            return None
-    except Exception:
-        return None
-
-    # Read script content from AGFS
-    try:
-        content = shell.filesystem.read_file(agfs_path)
-        if isinstance(content, bytes):
-            content = content.decode('utf-8')
-        lines = content.splitlines()
-    except Exception as e:
-        if not silent:
-            sys.stderr.write(f"agfs-shell: {agfs_path}: {str(e)}\n")
-        return 1
-
-    # Save current environment for positional parameters
-    old_env = {}
-    for key in ['0', '#', '@'] + [str(i) for i in range(1, 10)]:
-        if key in shell.env:
-            old_env[key] = shell.env[key]
-
-    # Set script name and arguments as environment variables
-    shell.env['0'] = agfs_path  # Script name
-
-    if script_args:
-        for i, arg in enumerate(script_args, start=1):
-            shell.env[str(i)] = arg
-        shell.env['#'] = str(len(script_args))
-        shell.env['@'] = ' '.join(script_args)
-    else:
-        shell.env['#'] = '0'
-        shell.env['@'] = ''
-
-    try:
-        exit_code = 0
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
-            line_num = i + 1
-
-            # Skip empty lines and comments
-            if not line or line.startswith('#'):
-                i += 1
-                continue
-
-            # Execute the command
-            try:
-                exit_code = shell.execute(line)
-
-                # Check if for-loop needs to be collected
-                if exit_code == EXIT_CODE_FOR_LOOP_NEEDED:
-                    # Collect for/do/done loop
-                    for_lines = [line]
-                    for_depth = 1  # Track nesting depth
-                    i += 1
-                    while i < len(lines):
-                        next_line = lines[i].strip()
-                        for_lines.append(next_line)
-                        # Strip comments before checking keywords
-                        next_line_no_comment = shell._strip_comment(next_line).strip()
-                        # Count nested for loops
-                        if next_line_no_comment.startswith('for '):
-                            for_depth += 1
-                        elif next_line_no_comment == 'done':
-                            for_depth -= 1
-                            if for_depth == 0:
-                                break
-                        i += 1
-
-                    # Execute the for loop
-                    exit_code = shell.execute_for_loop(for_lines)
-                    # Reset control flow codes to 0 for script execution
-                    if exit_code in [EXIT_CODE_CONTINUE, EXIT_CODE_BREAK]:
-                        exit_code = 0
-                # Check if while-loop needs to be collected
-                elif exit_code == EXIT_CODE_WHILE_LOOP_NEEDED:
-                    # Collect while/do/done loop
-                    while_lines = [line]
-                    while_depth = 1  # Track nesting depth
-                    i += 1
-                    while i < len(lines):
-                        next_line = lines[i].strip()
-                        while_lines.append(next_line)
-                        # Strip comments before checking keywords
-                        next_line_no_comment = shell._strip_comment(next_line).strip()
-                        # Count nested while loops
-                        if next_line_no_comment.startswith('while '):
-                            while_depth += 1
-                        elif next_line_no_comment == 'done':
-                            while_depth -= 1
-                            if while_depth == 0:
-                                break
-                        i += 1
-
-                    # Execute the while loop
-                    exit_code = shell.execute_while_loop(while_lines)
-                    # Reset control flow codes to 0 for script execution
-                    if exit_code in [EXIT_CODE_CONTINUE, EXIT_CODE_BREAK]:
-                        exit_code = 0
-                # Check if function definition needs to be collected
-                elif exit_code == EXIT_CODE_FUNCTION_DEF_NEEDED:
-                    # Collect function definition
-                    func_lines = [line]
-                    brace_depth = 1  # We've seen the opening {
-                    i += 1
-                    while i < len(lines):
-                        next_line = lines[i].strip()
-                        func_lines.append(next_line)
-                        # Track braces
-                        brace_depth += next_line.count('{')
-                        brace_depth -= next_line.count('}')
-                        if brace_depth == 0:
-                            break
-                        i += 1
-
-                    # Parse and store the function using AST parser
-                    func_ast = shell.control_parser.parse_function_definition(func_lines)
-                    if func_ast and func_ast.name:
-                        shell.functions[func_ast.name] = {
-                            'name': func_ast.name,
-                            'body': func_ast.body,
-                            'is_ast': True
-                        }
-                        exit_code = 0
-                    else:
-                        sys.stderr.write(f"Error at line {line_num}: invalid function definition\n")
-                        return 1
-
-                # Check if if-statement needs to be collected
-                elif exit_code == EXIT_CODE_IF_STATEMENT_NEEDED:
-                    # Collect if/then/else/fi statement with depth tracking
-                    if_lines = [line]
-                    if_depth = 1  # Track nesting depth
-                    i += 1
-                    while i < len(lines):
-                        next_line = lines[i].strip()
-                        if_lines.append(next_line)
-                        # Strip comments before checking keywords
-                        next_line_no_comment = shell._strip_comment(next_line).strip()
-                        # Track nested if statements
-                        if next_line_no_comment.startswith('if '):
-                            if_depth += 1
-                        elif next_line_no_comment == 'fi':
-                            if_depth -= 1
-                            if if_depth == 0:
-                                break
-                        i += 1
-
-                    # Execute the if statement
-                    exit_code = shell.execute_if_statement(if_lines)
-                    # Note: Non-zero exit code from if/for/while is normal
-                    # (condition evaluated to false or loop completed)
-                # Update $? with the exit code but don't stop on non-zero
-                # (bash default behavior - scripts continue unless set -e)
-                shell.env['?'] = str(exit_code)
-            except SystemExit as e:
-                # Handle exit command - return the exit code
-                return e.code if e.code is not None else 0
-            except Exception as e:
-                sys.stderr.write(f"Error at line {line_num}: {str(e)}\n")
-                return 1
-
-            i += 1
-
-        return exit_code
-    except KeyboardInterrupt:
-        # Ctrl-C during script execution - exit with code 130 (128 + SIGINT)
-        sys.stderr.write("\n")
-        return 130
-    except SystemExit as e:
-        # Handle exit command at top level
-        return e.code if e.code is not None else 0
-    except Exception as e:
-        if not silent:
-            sys.stderr.write(f"agfs-shell: {agfs_path}: {str(e)}\n")
-        return 1
-    finally:
-        # Restore old positional parameters
-        for key in ['0', '#', '@'] + [str(i) for i in range(1, 10)]:
-            if key in shell.env and key not in old_env:
-                del shell.env[key]
-        for key, value in old_env.items():
-            shell.env[key] = value
+    return shell.execute_script(agfs_path, script_args=script_args, silent=silent)
 
 
 # List of initrc files to check on startup (in order)
@@ -243,170 +58,28 @@ def execute_initrc_scripts(shell):
 
 
 def execute_script_file(shell, script_path, script_args=None):
-    """Execute a script file line by line
+    """Execute a local script file.
+
+    This is a wrapper around shell.execute_script_content() for local files.
 
     Args:
         shell: Shell instance
-        script_path: Path to script file
+        script_path: Path to local script file
         script_args: List of arguments to pass to script (accessible as $1, $2, etc.)
+
+    Returns:
+        Exit code from script execution
     """
-    # Set script name and arguments as environment variables
-    shell.env['0'] = script_path  # Script name
-
-    if script_args:
-        for i, arg in enumerate(script_args, start=1):
-            shell.env[str(i)] = arg
-        shell.env['#'] = str(len(script_args))
-        shell.env['@'] = ' '.join(script_args)
-    else:
-        shell.env['#'] = '0'
-        shell.env['@'] = ''
-
     try:
         with open(script_path, 'r') as f:
-            lines = f.readlines()
-
-        exit_code = 0
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
-            line_num = i + 1
-
-            # Skip empty lines and comments
-            if not line or line.startswith('#'):
-                i += 1
-                continue
-
-            # Execute the command
-            try:
-                exit_code = shell.execute(line)
-
-                # Check if for-loop needs to be collected
-                if exit_code == EXIT_CODE_FOR_LOOP_NEEDED:
-                    # Collect for/do/done loop
-                    for_lines = [line]
-                    for_depth = 1  # Track nesting depth
-                    i += 1
-                    while i < len(lines):
-                        next_line = lines[i].strip()
-                        for_lines.append(next_line)
-                        # Strip comments before checking keywords
-                        next_line_no_comment = shell._strip_comment(next_line).strip()
-                        # Count nested for loops
-                        if next_line_no_comment.startswith('for '):
-                            for_depth += 1
-                        elif next_line_no_comment == 'done':
-                            for_depth -= 1
-                            if for_depth == 0:
-                                break
-                        i += 1
-
-                    # Execute the for loop
-                    exit_code = shell.execute_for_loop(for_lines)
-                    # Reset control flow codes to 0 for script execution
-                    if exit_code in [EXIT_CODE_CONTINUE, EXIT_CODE_BREAK]:
-                        exit_code = 0
-                # Check if while-loop needs to be collected
-                elif exit_code == EXIT_CODE_WHILE_LOOP_NEEDED:
-                    # Collect while/do/done loop
-                    while_lines = [line]
-                    while_depth = 1  # Track nesting depth
-                    i += 1
-                    while i < len(lines):
-                        next_line = lines[i].strip()
-                        while_lines.append(next_line)
-                        # Strip comments before checking keywords
-                        next_line_no_comment = shell._strip_comment(next_line).strip()
-                        # Count nested while loops
-                        if next_line_no_comment.startswith('while '):
-                            while_depth += 1
-                        elif next_line_no_comment == 'done':
-                            while_depth -= 1
-                            if while_depth == 0:
-                                break
-                        i += 1
-
-                    # Execute the while loop
-                    exit_code = shell.execute_while_loop(while_lines)
-                    # Reset control flow codes to 0 for script execution
-                    if exit_code in [EXIT_CODE_CONTINUE, EXIT_CODE_BREAK]:
-                        exit_code = 0
-                # Check if function definition needs to be collected
-                elif exit_code == EXIT_CODE_FUNCTION_DEF_NEEDED:
-                    # Collect function definition
-                    func_lines = [line]
-                    brace_depth = 1  # We've seen the opening {
-                    i += 1
-                    while i < len(lines):
-                        next_line = lines[i].strip()
-                        func_lines.append(next_line)
-                        # Track braces
-                        brace_depth += next_line.count('{')
-                        brace_depth -= next_line.count('}')
-                        if brace_depth == 0:
-                            break
-                        i += 1
-
-                    # Parse and store the function using AST parser
-                    func_ast = shell.control_parser.parse_function_definition(func_lines)
-                    if func_ast and func_ast.name:
-                        shell.functions[func_ast.name] = {
-                            'name': func_ast.name,
-                            'body': func_ast.body,
-                            'is_ast': True
-                        }
-                        exit_code = 0
-                    else:
-                        sys.stderr.write(f"Error at line {line_num}: invalid function definition\n")
-                        return 1
-
-                # Check if if-statement needs to be collected
-                elif exit_code == EXIT_CODE_IF_STATEMENT_NEEDED:
-                    # Collect if/then/else/fi statement with depth tracking
-                    if_lines = [line]
-                    if_depth = 1  # Track nesting depth
-                    i += 1
-                    while i < len(lines):
-                        next_line = lines[i].strip()
-                        if_lines.append(next_line)
-                        # Strip comments before checking keywords
-                        next_line_no_comment = shell._strip_comment(next_line).strip()
-                        # Track nested if statements
-                        if next_line_no_comment.startswith('if '):
-                            if_depth += 1
-                        elif next_line_no_comment == 'fi':
-                            if_depth -= 1
-                            if if_depth == 0:
-                                break
-                        i += 1
-
-                    # Execute the if statement
-                    exit_code = shell.execute_if_statement(if_lines)
-                    # Note: Non-zero exit code from if/for/while is normal
-                    # (condition evaluated to false or loop completed)
-                # Update $? with the exit code but don't stop on non-zero
-                # (bash default behavior - scripts continue unless set -e)
-                shell.env['?'] = str(exit_code)
-            except SystemExit as e:
-                # Handle exit command - return the exit code
-                return e.code if e.code is not None else 0
-            except Exception as e:
-                sys.stderr.write(f"Error at line {line_num}: {str(e)}\n")
-                return 1
-
-            i += 1
-
-        return exit_code
-    except KeyboardInterrupt:
-        # Ctrl-C during script execution - exit with code 130 (128 + SIGINT)
-        sys.stderr.write("\n")
-        return 130
-    except SystemExit as e:
-        # Handle exit command at top level
-        return e.code if e.code is not None else 0
+            content = f.read()
+        return shell.execute_script_content(content, script_name=script_path, script_args=script_args)
     except FileNotFoundError:
         sys.stderr.write(f"agfs-shell: {script_path}: No such file or directory\n")
         return 127
+    except PermissionError:
+        sys.stderr.write(f"agfs-shell: {script_path}: Permission denied\n")
+        return 126
     except Exception as e:
         sys.stderr.write(f"agfs-shell: {script_path}: {str(e)}\n")
         return 1

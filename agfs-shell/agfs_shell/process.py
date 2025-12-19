@@ -4,6 +4,7 @@ from typing import List, Optional, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .filesystem import AGFSFileSystem
+    from .shell import Shell
 
 from .streams import InputStream, OutputStream, ErrorStream
 from .control_flow import ControlFlowException
@@ -21,7 +22,8 @@ class Process:
         stderr: Optional[ErrorStream] = None,
         executor: Optional[Callable] = None,
         filesystem: Optional['AGFSFileSystem'] = None,
-        env: Optional[dict] = None
+        env: Optional[dict] = None,
+        shell: Optional['Shell'] = None
     ):
         """
         Initialize a process
@@ -35,6 +37,7 @@ class Process:
             executor: Callable that executes the command
             filesystem: AGFS file system instance for file operations
             env: Environment variables dictionary
+            shell: Shell instance for commands that need shell access (e.g., source)
         """
         self.command = command
         self.args = args
@@ -44,6 +47,7 @@ class Process:
         self.executor = executor
         self.filesystem = filesystem
         self.env = env or {}
+        self.shell = shell
         self.exit_code = 0
 
     def execute(self) -> int:

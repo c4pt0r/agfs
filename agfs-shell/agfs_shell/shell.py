@@ -182,7 +182,8 @@ class Shell:
                     stderr=stderr,
                     executor=executor,
                     filesystem=self.filesystem,
-                    env=self.env
+                    env=self.env,
+                    shell=self
                 )
                 process.cwd = self.cwd
                 processes.append(process)
@@ -1310,6 +1311,209 @@ class Shell:
         """
         return self.executor.execute_function_call(func_name, args)
 
+    def execute_script(self, file_path: str, script_args: Optional[List[str]] = None, silent: bool = False) -> Optional[int]:
+        """
+        Execute a script file from AGFS filesystem line by line.
+
+        Args:
+            file_path: Path to script file in AGFS
+            script_args: List of arguments to pass to script (accessible as $1, $2, etc.)
+            silent: If True, suppress error messages for missing files
+
+        Returns:
+            Exit code from script execution, or None if file not found
+        """
+        # Check if file exists in AGFS
+        try:
+            if not self.filesystem.file_exists(file_path):
+                return None
+        except Exception:
+            return None
+
+        # Read script content from AGFS
+        try:
+            content = self.filesystem.read_file(file_path)
+            if isinstance(content, bytes):
+                content = content.decode('utf-8')
+        except Exception as e:
+            if not silent:
+                sys.stderr.write(f"agfs-shell: {file_path}: {str(e)}\n")
+            return 1
+
+        return self.execute_script_content(content, script_name=file_path, script_args=script_args, silent=silent)
+
+    def execute_script_content(self, content: str, script_name: str = "<script>",
+                                script_args: Optional[List[str]] = None, silent: bool = False) -> int:
+        """
+        Execute script content line by line.
+
+        This is the core script execution logic used by:
+        - execute_script (AGFS files)
+        - execute_script_file (local files via CLI)
+        - source command
+
+        Args:
+            content: Script content as string
+            script_name: Name to use for $0 (default: "<script>")
+            script_args: List of arguments to pass to script (accessible as $1, $2, etc.)
+            silent: If True, suppress error messages
+
+        Returns:
+            Exit code from script execution
+        """
+        lines = content.splitlines()
+
+        # Save current environment for positional parameters
+        old_env = {}
+        for key in ['0', '#', '@', '*'] + [str(i) for i in range(1, 100)]:
+            if key in self.env:
+                old_env[key] = self.env[key]
+
+        # Set script name and arguments as environment variables
+        self.env['0'] = script_name
+
+        if script_args:
+            for i, arg in enumerate(script_args, start=1):
+                self.env[str(i)] = arg
+            self.env['#'] = str(len(script_args))
+            self.env['@'] = ' '.join(script_args)
+            self.env['*'] = ' '.join(script_args)
+            # Clear extra positional params from previous invocations
+            for i in range(len(script_args) + 1, 100):
+                if str(i) in self.env:
+                    del self.env[str(i)]
+        else:
+            self.env['#'] = '0'
+            self.env['@'] = ''
+            self.env['*'] = ''
+            # Clear positional params
+            for i in range(1, 100):
+                if str(i) in self.env:
+                    del self.env[str(i)]
+
+        try:
+            exit_code = 0
+            i = 0
+            while i < len(lines):
+                line = lines[i].strip()
+                line_num = i + 1
+
+                # Skip empty lines and comments
+                if not line or line.startswith('#'):
+                    i += 1
+                    continue
+
+                # Execute the command
+                try:
+                    exit_code = self.execute(line)
+
+                    # Check if for-loop needs to be collected
+                    if exit_code == EXIT_CODE_FOR_LOOP_NEEDED:
+                        for_lines = [line]
+                        for_depth = 1
+                        i += 1
+                        while i < len(lines):
+                            next_line = lines[i].strip()
+                            for_lines.append(next_line)
+                            next_line_no_comment = self._strip_comment(next_line).strip()
+                            if next_line_no_comment.startswith('for '):
+                                for_depth += 1
+                            elif next_line_no_comment == 'done':
+                                for_depth -= 1
+                                if for_depth == 0:
+                                    break
+                            i += 1
+                        exit_code = self.execute_for_loop(for_lines)
+                        if exit_code in [EXIT_CODE_CONTINUE, EXIT_CODE_BREAK]:
+                            exit_code = 0
+
+                    elif exit_code == EXIT_CODE_WHILE_LOOP_NEEDED:
+                        while_lines = [line]
+                        while_depth = 1
+                        i += 1
+                        while i < len(lines):
+                            next_line = lines[i].strip()
+                            while_lines.append(next_line)
+                            next_line_no_comment = self._strip_comment(next_line).strip()
+                            if next_line_no_comment.startswith('while '):
+                                while_depth += 1
+                            elif next_line_no_comment == 'done':
+                                while_depth -= 1
+                                if while_depth == 0:
+                                    break
+                            i += 1
+                        exit_code = self.execute_while_loop(while_lines)
+                        if exit_code in [EXIT_CODE_CONTINUE, EXIT_CODE_BREAK]:
+                            exit_code = 0
+
+                    elif exit_code == EXIT_CODE_FUNCTION_DEF_NEEDED:
+                        func_lines = [line]
+                        brace_depth = 1
+                        i += 1
+                        while i < len(lines):
+                            next_line = lines[i].strip()
+                            func_lines.append(next_line)
+                            brace_depth += next_line.count('{')
+                            brace_depth -= next_line.count('}')
+                            if brace_depth == 0:
+                                break
+                            i += 1
+                        func_ast = self.control_parser.parse_function_definition(func_lines)
+                        if func_ast and func_ast.name:
+                            self.functions[func_ast.name] = {
+                                'name': func_ast.name,
+                                'body': func_ast.body,
+                                'is_ast': True
+                            }
+                            exit_code = 0
+                        else:
+                            sys.stderr.write(f"Error at line {line_num}: invalid function definition\n")
+                            return 1
+
+                    elif exit_code == EXIT_CODE_IF_STATEMENT_NEEDED:
+                        if_lines = [line]
+                        if_depth = 1
+                        i += 1
+                        while i < len(lines):
+                            next_line = lines[i].strip()
+                            if_lines.append(next_line)
+                            next_line_no_comment = self._strip_comment(next_line).strip()
+                            if next_line_no_comment.startswith('if '):
+                                if_depth += 1
+                            elif next_line_no_comment == 'fi':
+                                if_depth -= 1
+                                if if_depth == 0:
+                                    break
+                            i += 1
+                        exit_code = self.execute_if_statement(if_lines)
+
+                    self.env['?'] = str(exit_code)
+                except SystemExit as e:
+                    return e.code if e.code is not None else 0
+                except Exception as e:
+                    sys.stderr.write(f"Error at line {line_num}: {str(e)}\n")
+                    return 1
+
+                i += 1
+
+            return exit_code
+        except KeyboardInterrupt:
+            sys.stderr.write("\n")
+            return 130
+        except SystemExit as e:
+            return e.code if e.code is not None else 0
+        except Exception as e:
+            if not silent:
+                sys.stderr.write(f"agfs-shell: {script_name}: {str(e)}\n")
+            return 1
+        finally:
+            # Restore old positional parameters
+            for key in ['0', '#', '@', '*'] + [str(i) for i in range(1, 100)]:
+                if key in self.env and key not in old_env:
+                    del self.env[key]
+            for key, value in old_env.items():
+                self.env[key] = value
+
     def execute(self, command_line: str, stdin_data: Optional[bytes] = None, heredoc_data: Optional[bytes] = None) -> int:
         """
         Execute a command line (possibly with pipelines and redirections)
@@ -1599,7 +1803,7 @@ class Shell:
 
             stderr = ErrorStream.to_buffer()
 
-            # Create process with filesystem, cwd, and env
+            # Create process with filesystem, cwd, env, and shell
             process = Process(
                 command=cmd,
                 args=args,
@@ -1608,7 +1812,8 @@ class Shell:
                 stderr=stderr,
                 executor=executor,
                 filesystem=self.filesystem,
-                env=self.env
+                env=self.env,
+                shell=self
             )
             # Pass cwd to process for pwd command
             process.cwd = self.cwd
