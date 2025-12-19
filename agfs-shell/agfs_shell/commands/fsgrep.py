@@ -83,7 +83,7 @@ def cmd_fsgrep(process: Process) -> int:
     # Normalize path
     if not path.startswith('/'):
         # Convert relative path to absolute
-        cwd = process.env.get('PWD', '/')
+        cwd = getattr(process, 'cwd', '/')
         if path == '.':
             # Current directory
             path = cwd
