@@ -1322,12 +1322,13 @@ type CustomGrepResult struct {
 // CustomGrepper interface for plugins that provide custom grep implementation
 // This allows plugins to implement their own search logic (e.g., vector search, fuzzy search, etc.)
 type CustomGrepper interface {
-	CustomGrep(path, query string) ([]CustomGrepResult, error)
+	CustomGrep(path, query string, limit int) ([]CustomGrepResult, error)
 }
 
 // CustomGrep performs custom grep on mounted plugins that support it
 // Returns custom search results if the path belongs to a plugin with CustomGrepper implementation
-func (mfs *MountableFS) CustomGrep(path, query string) ([]CustomGrepResult, error) {
+// limit specifies the maximum number of results to return (0 means use default)
+func (mfs *MountableFS) CustomGrep(path, query string, limit int) ([]CustomGrepResult, error) {
 	path = filesystem.NormalizePath(path)
 
 	// Find the mount point for this path
@@ -1343,7 +1344,7 @@ func (mfs *MountableFS) CustomGrep(path, query string) ([]CustomGrepResult, erro
 	}
 
 	// Call the plugin's CustomGrep method with the relative path
-	results, err := grepper.CustomGrep(relPath, query)
+	results, err := grepper.CustomGrep(relPath, query, limit)
 	if err != nil {
 		return nil, err
 	}

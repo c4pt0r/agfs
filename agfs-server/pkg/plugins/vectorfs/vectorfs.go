@@ -30,6 +30,12 @@ type indexTask struct {
 	data      string
 }
 
+// indexingFileInfo tracks a file being indexed
+type indexingFileInfo struct {
+	FileName  string
+	StartTime time.Time
+}
+
 type VectorFSPlugin struct {
 	s3Client        *S3Client
 	tidbClient      *TiDBClient
@@ -42,6 +48,10 @@ type VectorFSPlugin struct {
 	indexQueue chan indexTask
 	workerWg   sync.WaitGroup
 	shutdown   chan struct{}
+
+	// Indexing status tracking: namespace -> (digest -> fileInfo)
+	indexingStatus   map[string]map[string]*indexingFileInfo
+	indexingStatusMu sync.RWMutex
 }
 
 // NewVectorFSPlugin creates a new VectorFS plugin
@@ -72,6 +82,8 @@ func (v *VectorFSPlugin) Validate(cfg map[string]interface{}) error {
 		"embedding_provider", "openai_api_key", "embedding_model", "embedding_dim",
 		// Chunking configuration
 		"chunk_size", "chunk_overlap",
+		// Worker pool configuration
+		"index_workers",
 	}
 	if err := config.ValidateOnlyKnownKeys(cfg, allowedKeys); err != nil {
 		return err
@@ -148,6 +160,9 @@ func (v *VectorFSPlugin) Initialize(cfg map[string]interface{}) error {
 
 	v.indexer = NewIndexer(v.s3Client, v.tidbClient, v.embeddingClient, chunkerConfig)
 
+	// Initialize indexing status tracking
+	v.indexingStatus = make(map[string]map[string]*indexingFileInfo)
+
 	// Initialize worker pool for async indexing
 	workerCount := config.GetIntConfig(cfg, "index_workers", 4)
 	v.indexQueue = make(chan indexTask, 100) // Buffer size 100
@@ -163,7 +178,55 @@ func (v *VectorFSPlugin) Initialize(cfg map[string]interface{}) error {
 	return nil
 }
 
-// indexWorker processes indexing tasks from the queue
+// addIndexingTask registers a file as being indexed
+func (v *VectorFSPlugin) addIndexingTask(namespace, digest, fileName string) {
+	v.indexingStatusMu.Lock()
+	defer v.indexingStatusMu.Unlock()
+
+	if v.indexingStatus[namespace] == nil {
+		v.indexingStatus[namespace] = make(map[string]*indexingFileInfo)
+	}
+	v.indexingStatus[namespace][digest] = &indexingFileInfo{
+		FileName:  fileName,
+		StartTime: time.Now(),
+	}
+}
+
+// removeIndexingTask removes a file from the indexing status
+func (v *VectorFSPlugin) removeIndexingTask(namespace, digest string) {
+	v.indexingStatusMu.Lock()
+	defer v.indexingStatusMu.Unlock()
+
+	if v.indexingStatus[namespace] != nil {
+		delete(v.indexingStatus[namespace], digest)
+		if len(v.indexingStatus[namespace]) == 0 {
+			delete(v.indexingStatus, namespace)
+		}
+	}
+}
+
+// getIndexingStatus returns the indexing status for a namespace
+func (v *VectorFSPlugin) getIndexingStatus(namespace string) string {
+	v.indexingStatusMu.RLock()
+	defer v.indexingStatusMu.RUnlock()
+
+	tasks := v.indexingStatus[namespace]
+	if len(tasks) == 0 {
+		return "idle"
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("indexing %d file(s):\n", len(tasks)))
+	for _, info := range tasks {
+		elapsed := time.Since(info.StartTime).Round(time.Second)
+		sb.WriteString(fmt.Sprintf("  - %s (%v)\n", info.FileName, elapsed))
+	}
+	return sb.String()
+}
+
+// indexWorker processes chunk indexing tasks from the queue
+// Note: S3 upload and metadata registration are done synchronously in Write(),
+// so this worker only handles chunking, embedding generation, and chunk storage.
 func (v *VectorFSPlugin) indexWorker(id int) {
 	defer v.workerWg.Done()
 
@@ -173,10 +236,12 @@ func (v *VectorFSPlugin) indexWorker(id int) {
 			log.Debugf("[vectorfs] Index worker %d shutting down", id)
 			return
 		case task := <-v.indexQueue:
-			err := v.indexer.IndexDocument(task.namespace, task.digest, task.fileName, task.data)
+			err := v.indexer.IndexChunks(task.namespace, task.digest, task.fileName, task.data)
 			if err != nil {
-				log.Errorf("[vectorfs] Worker %d failed to index document %s: %v", id, task.fileName, err)
+				log.Errorf("[vectorfs] Worker %d failed to index chunks for %s: %v", id, task.fileName, err)
 			}
+			// Remove from indexing status regardless of success/failure
+			v.removeIndexingTask(task.namespace, task.digest)
 		}
 	}
 }
@@ -300,7 +365,7 @@ func (v *VectorFSPlugin) Shutdown() error {
 }
 
 // CustomGrep implements the CustomGrepper interface using vector search
-func (vfs *vectorFS) CustomGrep(path, query string) ([]mountablefs.CustomGrepResult, error) {
+func (vfs *vectorFS) CustomGrep(path, query string, limit int) ([]mountablefs.CustomGrepResult, error) {
 	// Parse path to get namespace
 	namespace, relativePath, err := parsePath(path)
 	if err != nil {
@@ -313,12 +378,13 @@ func (vfs *vectorFS) CustomGrep(path, query string) ([]mountablefs.CustomGrepRes
 	}
 
 	// Use VectorSearch method (dependency injection point)
-	return vfs.VectorSearch(namespace, query)
+	return vfs.VectorSearch(namespace, query, limit)
 }
 
 // VectorSearch performs vector similarity search using embeddings
 // This method can be injected/replaced for testing or alternative implementations
-func (vfs *vectorFS) VectorSearch(namespace, query string) ([]mountablefs.CustomGrepResult, error) {
+// limit specifies the maximum number of results to return
+func (vfs *vectorFS) VectorSearch(namespace, query string, limit int) ([]mountablefs.CustomGrepResult, error) {
 	// Generate embedding for query
 	queryEmbedding, err := vfs.plugin.embeddingClient.GenerateEmbedding(query)
 	if err != nil {
@@ -326,7 +392,7 @@ func (vfs *vectorFS) VectorSearch(namespace, query string) ([]mountablefs.Custom
 	}
 
 	// Perform vector search in TiDB
-	results, err := vfs.plugin.tidbClient.VectorSearch(namespace, queryEmbedding, 10)
+	results, err := vfs.plugin.tidbClient.VectorSearch(namespace, queryEmbedding, limit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to perform vector search: %w", err)
 	}
@@ -439,7 +505,7 @@ func (vfs *vectorFS) Read(path string, offset int64, size int64) ([]byte, error)
 
 	// Handle virtual .indexing file
 	if relativePath == ".indexing" {
-		status := "idle" // TODO: get actual indexing status
+		status := vfs.plugin.getIndexingStatus(namespace)
 		return []byte(status), nil
 	}
 
@@ -493,14 +559,30 @@ func (vfs *vectorFS) Write(path string, data []byte, offset int64, flags filesys
 	// Extract relative path from docs/ (includes subdirectories)
 	// relativePath format: "docs/subdir/file.txt" -> fileName: "subdir/file.txt"
 	fileName := strings.TrimPrefix(relativePath, "docs/")
+	content := string(data)
 
-	// Submit indexing task to worker pool
+	// Phase 1 (synchronous): Upload to S3 and register metadata in TiDB
+	// After this, the file is immediately visible via ls/cat
+	alreadyExists, err := vfs.plugin.indexer.PrepareDocument(namespace, digest, fileName, content)
+	if err != nil {
+		return 0, fmt.Errorf("failed to prepare document: %w", err)
+	}
+
+	// If document already exists (same content), no need to re-index chunks
+	if alreadyExists {
+		return int64(len(data)), nil
+	}
+
+	// Phase 2 (async): Queue chunk indexing for vector search
 	task := indexTask{
 		namespace: namespace,
 		digest:    digest,
 		fileName:  fileName,
-		data:      string(data),
+		data:      content,
 	}
+
+	// Register task in indexing status before queuing
+	vfs.plugin.addIndexingTask(namespace, digest, fileName)
 
 	// Non-blocking send to queue
 	select {
@@ -561,6 +643,7 @@ func (vfs *vectorFS) ReadDir(path string) ([]filesystem.FileInfo, error) {
 
 	// Namespace directory
 	if relativePath == "" {
+		indexingStatus := vfs.plugin.getIndexingStatus(namespace)
 		return []filesystem.FileInfo{
 			{
 				Name:    "docs",
@@ -572,7 +655,7 @@ func (vfs *vectorFS) ReadDir(path string) ([]filesystem.FileInfo, error) {
 			},
 			{
 				Name:    ".indexing",
-				Size:    4,
+				Size:    int64(len(indexingStatus)),
 				Mode:    0444,
 				ModTime: now,
 				IsDir:   false,
@@ -708,9 +791,10 @@ func (vfs *vectorFS) Stat(path string) (*filesystem.FileInfo, error) {
 
 	// .indexing status file
 	if relativePath == ".indexing" {
+		indexingStatus := vfs.plugin.getIndexingStatus(namespace)
 		return &filesystem.FileInfo{
 			Name:    ".indexing",
-			Size:    4,
+			Size:    int64(len(indexingStatus)),
 			Mode:    0444,
 			ModTime: time.Now(),
 			IsDir:   false,

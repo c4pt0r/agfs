@@ -1027,6 +1027,7 @@ type GrepRequest struct {
 	Recursive       bool   `json:"recursive"`        // Whether to search recursively in directories
 	CaseInsensitive bool   `json:"case_insensitive"` // Case-insensitive matching
 	Stream          bool   `json:"stream"`           // Stream results as NDJSON (one match per line)
+	Limit           int    `json:"limit,omitempty"`  // Maximum number of results (0 means no limit, default 10 for custom grep)
 }
 
 // GrepMatch represents a single match result
@@ -1064,10 +1065,15 @@ func (h *Handler) Grep(w http.ResponseWriter, r *http.Request) {
 	// Try custom grep first (if filesystem supports it)
 	// This allows plugins like vectorfs to implement their own search logic
 	if cg, ok := h.fs.(interface {
-		CustomGrep(string, string) ([]mountablefs.CustomGrepResult, error)
+		CustomGrep(string, string, int) ([]mountablefs.CustomGrepResult, error)
 	}); ok {
+		// Set default limit for custom grep if not specified
+		limit := req.Limit
+		if limit <= 0 {
+			limit = 10 // Default to 10 results for vector search
+		}
 		// Attempt custom grep (e.g., vector search)
-		customResults, err := cg.CustomGrep(req.Path, req.Pattern)
+		customResults, err := cg.CustomGrep(req.Path, req.Pattern, limit)
 		if err == nil && len(customResults) > 0 {
 			// Convert custom results to GrepMatch format
 			var matches []GrepMatch

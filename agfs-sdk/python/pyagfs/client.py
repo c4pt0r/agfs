@@ -566,7 +566,7 @@ class AGFSClient:
         except Exception as e:
             self._handle_request_error(e)
 
-    def grep(self, path: str, pattern: str, recursive: bool = False, case_insensitive: bool = False, stream: bool = False):
+    def grep(self, path: str, pattern: str, recursive: bool = False, case_insensitive: bool = False, stream: bool = False, limit: int = 0):
         """Search for a pattern in files using regular expressions
 
         Args:
@@ -575,6 +575,7 @@ class AGFSClient:
             recursive: Whether to search recursively in directories (default: False)
             case_insensitive: Whether to perform case-insensitive matching (default: False)
             stream: Whether to stream results as NDJSON (default: False)
+            limit: Maximum number of results to return (0 means default, for vector search defaults to 10)
 
         Returns:
             If stream=False: Dict with 'matches' (list of match objects) and 'count'
@@ -593,15 +594,19 @@ class AGFSClient:
             ...         print(f"{item['file']}:{item['line']}: {item['content']}")
         """
         try:
+            request_body = {
+                "path": path,
+                "pattern": pattern,
+                "recursive": recursive,
+                "case_insensitive": case_insensitive,
+                "stream": stream
+            }
+            if limit > 0:
+                request_body["limit"] = limit
+
             response = self.session.post(
                 f"{self.api_base}/grep",
-                json={
-                    "path": path,
-                    "pattern": pattern,
-                    "recursive": recursive,
-                    "case_insensitive": case_insensitive,
-                    "stream": stream
-                },
+                json=request_body,
                 timeout=None if stream else self.timeout,
                 stream=stream
             )

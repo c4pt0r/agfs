@@ -255,7 +255,7 @@ class AGFSFileSystem:
             raise AGFSClientError(str(e))
 
     def grep(self, path: str, pattern: str, recursive: bool = False,
-             case_insensitive: bool = False, stream: bool = False):
+             case_insensitive: bool = False, stream: bool = False, limit: int = 0):
         """
         Search for pattern in files using server-side grep (supports custom implementations like VectorFS)
 
@@ -265,6 +265,7 @@ class AGFSFileSystem:
             recursive: Whether to search recursively in directories
             case_insensitive: Whether to perform case-insensitive matching (for text grep)
             stream: Whether to stream results
+            limit: Maximum number of results to return (0 means default, for vector search defaults to 10)
 
         Returns:
             Dict with 'matches' (list of match objects) and 'count'
@@ -274,7 +275,7 @@ class AGFSFileSystem:
             AGFSClientError: If grep operation fails
         """
         try:
-            return self.client.grep(path, pattern, recursive, case_insensitive, stream)
+            return self.client.grep(path, pattern, recursive, case_insensitive, stream, limit)
         except AGFSClientError as e:
             raise AGFSClientError(str(e))
 

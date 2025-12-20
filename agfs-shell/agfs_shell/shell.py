@@ -53,6 +53,9 @@ class Shell:
         # Function definitions: {name: {'params': [...], 'body': [...]}}
         self.functions = {}
 
+        # Aliases: {name: expansion_string}
+        self.aliases = {}
+
         # Variable scope stack for local variables
         # Each entry is a dict of local variables for that scope
         self.local_scopes = []
@@ -430,6 +433,109 @@ class Shell:
             Text with all expansions applied
         """
         return self.expression_expander.expand(text)
+
+    def _expand_alias(self, command_line: str) -> str:
+        """
+        Expand aliases in the command line.
+
+        Only the first word of a simple command is checked for alias expansion.
+        Aliases that end with a space also expand the next word.
+
+        Escape alias expansion by:
+        - Quoting the command: 'command' or "command"
+        - Using backslash: \\command
+
+        Returns:
+            Command line with aliases expanded
+        """
+        if not self.aliases:
+            return command_line
+
+        stripped = command_line.strip()
+        if not stripped:
+            return command_line
+
+        # Don't expand if command starts with backslash (escape)
+        if stripped.startswith('\\'):
+            return stripped[1:]  # Remove the backslash and return
+
+        # Don't expand quoted commands
+        if stripped.startswith('"') or stripped.startswith("'"):
+            return command_line
+
+        # Find the first word (command name)
+        # Handle commands with leading spaces
+        leading_spaces = len(command_line) - len(command_line.lstrip())
+
+        # Split on first whitespace to get command and rest
+        parts = stripped.split(None, 1)
+        if not parts:
+            return command_line
+
+        cmd_name = parts[0]
+        rest = parts[1] if len(parts) > 1 else ''
+
+        # Check if this command is an alias
+        if cmd_name in self.aliases:
+            expansion = self.aliases[cmd_name]
+            # If the alias expansion ends with a space, the next word is also
+            # subject to alias expansion (bash behavior)
+            if rest:
+                result = f"{expansion} {rest}"
+            else:
+                result = expansion
+
+            # Recursively expand (to handle alias chains), but with a limit
+            # to prevent infinite loops
+            return self._expand_alias_recursive(result, set([cmd_name]))
+
+        return command_line
+
+    def _expand_alias_recursive(self, command_line: str, seen: set, depth: int = 0) -> str:
+        """
+        Recursively expand aliases, avoiding infinite loops.
+
+        Args:
+            command_line: Command line to expand
+            seen: Set of already expanded alias names (to prevent loops)
+            depth: Current recursion depth
+
+        Returns:
+            Expanded command line
+        """
+        if depth > 10:  # Prevent excessive recursion
+            return command_line
+
+        stripped = command_line.strip()
+        if not stripped:
+            return command_line
+
+        # Split to get first word
+        parts = stripped.split(None, 1)
+        if not parts:
+            return command_line
+
+        cmd_name = parts[0]
+        rest = parts[1] if len(parts) > 1 else ''
+
+        # Skip if we've already seen this alias (loop detection)
+        if cmd_name in seen:
+            return command_line
+
+        # Check if this is an alias
+        if cmd_name in self.aliases:
+            expansion = self.aliases[cmd_name]
+            seen.add(cmd_name)
+
+            if rest:
+                result = f"{expansion} {rest}"
+            else:
+                result = expansion
+
+            # Continue recursive expansion
+            return self._expand_alias_recursive(result, seen, depth + 1)
+
+        return command_line
 
     def _expand_variables_legacy(self, text: str) -> str:
         """
@@ -1639,6 +1745,9 @@ class Shell:
 
         # Expand variables in command line
         command_line = self._expand_variables(command_line)
+
+        # Expand aliases (only for the first word of the command)
+        command_line = self._expand_alias(command_line)
 
         # Handle && and || operators (conditional execution)
         # Split by && and || while preserving which operator was used

@@ -21,7 +21,7 @@ def cmd_fsgrep(process: Process) -> int:
     Options:
         -r          Recursive search (default for directories)
         -i          Case insensitive (for text grep, not VectorFS)
-        -n          Show line numbers (default)
+        -n NUM      Return top N results (for VectorFS, default 10)
         -c          Count matches only
         -q          Quiet mode (only show if matches found)
 
@@ -31,7 +31,7 @@ def cmd_fsgrep(process: Process) -> int:
     Examples:
         # VectorFS semantic search
         fsgrep "container orchestration" /vectorfs/project/docs
-        fsgrep -r "infrastructure automation" /vectorfs/namespace/docs
+        fsgrep -n 5 "infrastructure automation" /vectorfs/namespace/docs
 
         # Regular text grep on other filesystems
         fsgrep "error" /local/tmp/app.log
@@ -41,14 +41,15 @@ def cmd_fsgrep(process: Process) -> int:
     VectorFS Features:
         - Semantic search using embeddings
         - Returns results ranked by relevance
+        - Use -n to control how many results to return
         - Automatically searches all documents in namespace
     """
     # Parse options
     recursive = False
     case_insensitive = False
-    show_line_numbers = True  # Default to showing line numbers
     count_only = False
     quiet = False
+    limit = 0  # 0 means use default (10 for VectorFS)
 
     args = process.args[:]
 
@@ -57,13 +58,39 @@ def cmd_fsgrep(process: Process) -> int:
         if opt == '--':
             break
 
+        # Handle -n with number argument
+        if opt == '-n':
+            if not args:
+                process.stderr.write("fsgrep: option '-n' requires an argument\n")
+                return 2
+            try:
+                limit = int(args.pop(0))
+                if limit <= 0:
+                    process.stderr.write("fsgrep: invalid number for -n: must be positive\n")
+                    return 2
+            except ValueError:
+                process.stderr.write("fsgrep: invalid number for -n\n")
+                return 2
+            continue
+
         for char in opt[1:]:
             if char == 'r':
                 recursive = True
             elif char == 'i':
                 case_insensitive = True
             elif char == 'n':
-                show_line_numbers = True
+                # -n combined with other options, need to check next arg
+                if not args:
+                    process.stderr.write("fsgrep: option '-n' requires an argument\n")
+                    return 2
+                try:
+                    limit = int(args.pop(0))
+                    if limit <= 0:
+                        process.stderr.write("fsgrep: invalid number for -n: must be positive\n")
+                        return 2
+                except ValueError:
+                    process.stderr.write("fsgrep: invalid number for -n\n")
+                    return 2
             elif char == 'c':
                 count_only = True
             elif char == 'q':
@@ -115,7 +142,8 @@ def cmd_fsgrep(process: Process) -> int:
             pattern=pattern,
             recursive=recursive,
             case_insensitive=case_insensitive,
-            stream=False
+            stream=False,
+            limit=limit
         )
 
         matches = result.get('matches', [])
@@ -140,11 +168,8 @@ def cmd_fsgrep(process: Process) -> int:
             content = match.get('content', '')
             metadata = match.get('metadata', {})
 
-            # Build output
-            if show_line_numbers:
-                output = f"\033[35m{file_path}\033[0m:\033[32m{line_num}\033[0m: {content}"
-            else:
-                output = f"\033[35m{file_path}\033[0m: {content}"
+            # Build output (always show line numbers)
+            output = f"\033[35m{file_path}\033[0m:\033[32m{line_num}\033[0m: {content}"
 
             # Add metadata for VectorFS results
             if metadata and is_vectorfs:
