@@ -246,6 +246,13 @@ func (c *TiDBClient) InsertFileMetadata(namespace string, meta FileMetadata) err
 	return nil
 }
 
+// ChunkData represents a chunk to be inserted
+type ChunkData struct {
+	ChunkIndex int
+	ChunkText  string
+	Embedding  []float32
+}
+
 // InsertChunk inserts a document chunk with embedding
 func (c *TiDBClient) InsertChunk(namespace, fileDigest string, chunkIndex int, chunkText string, embedding []float32) error {
 	tableSuffix := sanitizeTableName(namespace)
@@ -265,6 +272,51 @@ func (c *TiDBClient) InsertChunk(namespace, fileDigest string, chunkIndex int, c
 		return fmt.Errorf("failed to insert chunk: %w", err)
 	}
 
+	return nil
+}
+
+// InsertChunksBatch inserts multiple chunks in a single batch operation
+// This significantly reduces database round-trips compared to individual inserts
+func (c *TiDBClient) InsertChunksBatch(namespace, fileDigest string, chunks []ChunkData) error {
+	if len(chunks) == 0 {
+		return nil
+	}
+
+	tableSuffix := sanitizeTableName(namespace)
+	chunksTable := fmt.Sprintf("tbl_chunks_%s", tableSuffix)
+
+	// Build batch insert query with multiple value sets
+	// INSERT INTO table (cols) VALUES (?, ?, ?, ?), (?, ?, ?, ?), ...
+	const batchSize = 50 // Optimal batch size to avoid query size limits
+
+	for i := 0; i < len(chunks); i += batchSize {
+		end := i + batchSize
+		if end > len(chunks) {
+			end = len(chunks)
+		}
+		batch := chunks[i:end]
+
+		// Build placeholders and args
+		placeholders := make([]string, len(batch))
+		args := make([]interface{}, 0, len(batch)*4)
+
+		for j, chunk := range batch {
+			placeholders[j] = "(?, ?, ?, ?)"
+			args = append(args, fileDigest, chunk.ChunkIndex, chunk.ChunkText, formatVector(chunk.Embedding))
+		}
+
+		query := fmt.Sprintf(`
+			INSERT INTO %s (file_digest, chunk_index, chunk_text, embedding)
+			VALUES %s
+		`, chunksTable, strings.Join(placeholders, ", "))
+
+		_, err := c.db.Exec(query, args...)
+		if err != nil {
+			return fmt.Errorf("failed to batch insert chunks (batch starting at %d): %w", i, err)
+		}
+	}
+
+	log.Debugf("[vectorfs/tidb] Batch inserted %d chunks for file %s", len(chunks), fileDigest)
 	return nil
 }
 
@@ -347,6 +399,73 @@ func (c *TiDBClient) ListFiles(namespace string) ([]FileMetadata, error) {
 	}
 
 	return files, nil
+}
+
+// ListFilesWithPrefix lists files in a namespace with a given prefix (database-level filtering)
+// This is more efficient than ListFiles when only a subset of files is needed
+func (c *TiDBClient) ListFilesWithPrefix(namespace, prefix string) ([]FileMetadata, error) {
+	tableSuffix := sanitizeTableName(namespace)
+	metaTable := fmt.Sprintf("tbl_meta_%s", tableSuffix)
+
+	// Use LIKE for prefix matching - the index on file_name will be used
+	query := fmt.Sprintf(`
+		SELECT file_digest, file_name, s3_key, file_size, created_at, updated_at
+		FROM %s
+		WHERE file_name LIKE ?
+		ORDER BY file_name
+	`, metaTable)
+
+	// Escape special LIKE characters in prefix and add wildcard
+	escapedPrefix := strings.ReplaceAll(prefix, "%", "\\%")
+	escapedPrefix = strings.ReplaceAll(escapedPrefix, "_", "\\_")
+	pattern := escapedPrefix + "%"
+
+	rows, err := c.db.Query(query, pattern)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var files []FileMetadata
+	for rows.Next() {
+		var file FileMetadata
+		if err := rows.Scan(&file.FileDigest, &file.FileName, &file.S3Key, &file.FileSize,
+			&file.CreatedAt, &file.UpdatedAt); err != nil {
+			return nil, err
+		}
+		files = append(files, file)
+	}
+
+	return files, nil
+}
+
+// HasFilesWithPrefix checks if any files exist with the given prefix (for directory detection)
+// This is much faster than loading all files just to check if a directory exists
+func (c *TiDBClient) HasFilesWithPrefix(namespace, prefix string) (bool, error) {
+	tableSuffix := sanitizeTableName(namespace)
+	metaTable := fmt.Sprintf("tbl_meta_%s", tableSuffix)
+
+	query := fmt.Sprintf(`
+		SELECT 1 FROM %s
+		WHERE file_name LIKE ?
+		LIMIT 1
+	`, metaTable)
+
+	// Escape special LIKE characters in prefix and add wildcard
+	escapedPrefix := strings.ReplaceAll(prefix, "%", "\\%")
+	escapedPrefix = strings.ReplaceAll(escapedPrefix, "_", "\\_")
+	pattern := escapedPrefix + "%"
+
+	var exists int
+	err := c.db.QueryRow(query, pattern).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
 
 // DeleteFileChunks deletes all chunks for a file

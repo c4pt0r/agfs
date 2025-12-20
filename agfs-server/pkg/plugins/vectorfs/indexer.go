@@ -99,12 +99,20 @@ func (idx *Indexer) IndexChunks(namespace, digest, fileName, content string) err
 		return fmt.Errorf("failed to generate embeddings: %w", err)
 	}
 
-	// Insert chunks with embeddings
+	// Prepare chunk data for batch insert
+	chunkDataList := make([]ChunkData, len(chunks))
 	for i, chunk := range chunks {
-		err = idx.tidbClient.InsertChunk(namespace, digest, chunk.Index, chunk.Text, embeddings[i])
-		if err != nil {
-			return fmt.Errorf("failed to insert chunk %d: %w", i, err)
+		chunkDataList[i] = ChunkData{
+			ChunkIndex: chunk.Index,
+			ChunkText:  chunk.Text,
+			Embedding:  embeddings[i],
 		}
+	}
+
+	// Batch insert all chunks (reduces N database round-trips to 1-2)
+	err = idx.tidbClient.InsertChunksBatch(namespace, digest, chunkDataList)
+	if err != nil {
+		return fmt.Errorf("failed to batch insert chunks: %w", err)
 	}
 
 	log.Infof("[vectorfs/indexer] Successfully indexed document: %s (%d chunks)",

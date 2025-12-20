@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -45,7 +46,9 @@ func NewEmbeddingClient(cfg EmbeddingConfig) (*EmbeddingClient, error) {
 		apiKey:    cfg.APIKey,
 		model:     cfg.Model,
 		dimension: cfg.Dimension,
-		client:    &http.Client{},
+		client: &http.Client{
+			Timeout: 60 * time.Second, // Prevent indefinite blocking on API calls
+		},
 	}, nil
 }
 

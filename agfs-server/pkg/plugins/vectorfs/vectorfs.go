@@ -584,16 +584,23 @@ func (vfs *vectorFS) Write(path string, data []byte, offset int64, flags filesys
 	// Register task in indexing status before queuing
 	vfs.plugin.addIndexingTask(namespace, digest, fileName)
 
-	// Non-blocking send to queue
+	// Non-blocking send to queue with proper overflow handling
 	select {
 	case vfs.plugin.indexQueue <- task:
 		// Task queued successfully
 	default:
-		// Queue is full, log warning but don't block
+		// Queue is full - use a goroutine with shutdown awareness to avoid leak
 		log.Warnf("[vectorfs] Index queue full, document %s will be indexed when queue has space", fileName)
-		go func() {
-			vfs.plugin.indexQueue <- task
-		}()
+		go func(t indexTask) {
+			select {
+			case vfs.plugin.indexQueue <- t:
+				// Task eventually queued
+			case <-vfs.plugin.shutdown:
+				// System shutting down, remove from indexing status
+				vfs.plugin.removeIndexingTask(t.namespace, t.digest)
+				log.Warnf("[vectorfs] Shutdown while waiting to queue %s, task dropped", t.fileName)
+			}
+		}(task)
 	}
 
 	return int64(len(data)), nil
@@ -666,18 +673,24 @@ func (vfs *vectorFS) ReadDir(path string) ([]filesystem.FileInfo, error) {
 
 	// docs/ directory or subdirectory under docs/
 	if relativePath == "docs" || strings.HasPrefix(relativePath, "docs/") {
-		// List files in this namespace
-		files, err := vfs.plugin.tidbClient.ListFiles(namespace)
-		if err != nil {
-			return nil, err
-		}
-
 		// Determine the subdirectory prefix we're listing
 		// relativePath: "docs" -> subPrefix: ""
 		// relativePath: "docs/subdir" -> subPrefix: "subdir/"
 		var subPrefix string
 		if relativePath != "docs" {
 			subPrefix = strings.TrimPrefix(relativePath, "docs/") + "/"
+		}
+
+		// Use prefix-filtered query for better performance (database-level filtering)
+		var files []FileMetadata
+		var err error
+		if subPrefix != "" {
+			files, err = vfs.plugin.tidbClient.ListFilesWithPrefix(namespace, subPrefix)
+		} else {
+			files, err = vfs.plugin.tidbClient.ListFiles(namespace)
+		}
+		if err != nil {
+			return nil, err
 		}
 
 		// Track unique entries at this level
@@ -687,13 +700,8 @@ func (vfs *vectorFS) ReadDir(path string) ([]filesystem.FileInfo, error) {
 		for _, f := range files {
 			fileName := f.FileName
 
-			// Check if this file belongs to the current directory level
+			// Remove the prefix to get relative path (if we have a prefix)
 			if subPrefix != "" {
-				// We're in a subdirectory, only include files under this prefix
-				if !strings.HasPrefix(fileName, subPrefix) {
-					continue
-				}
-				// Remove the prefix to get relative path
 				fileName = strings.TrimPrefix(fileName, subPrefix)
 			}
 
@@ -824,24 +832,23 @@ func (vfs *vectorFS) Stat(path string) (*filesystem.FileInfo, error) {
 		}
 
 		// Check if this is a virtual directory (any file has this prefix)
-		files, err := vfs.plugin.tidbClient.ListFiles(namespace)
+		// Use HasFilesWithPrefix for O(1) check instead of loading all files
+		dirPrefix := fileName + "/"
+		hasFiles, err := vfs.plugin.tidbClient.HasFilesWithPrefix(namespace, dirPrefix)
 		if err != nil {
 			return nil, err
 		}
 
-		dirPrefix := fileName + "/"
-		for _, f := range files {
-			if strings.HasPrefix(f.FileName, dirPrefix) {
-				// This is a virtual directory
-				return &filesystem.FileInfo{
-					Name:    filepath.Base(fileName),
-					Size:    0,
-					Mode:    0755,
-					ModTime: time.Now(),
-					IsDir:   true,
-					Meta:    filesystem.MetaData{Name: PluginName, Type: "directory"},
-				}, nil
-			}
+		if hasFiles {
+			// This is a virtual directory
+			return &filesystem.FileInfo{
+				Name:    filepath.Base(fileName),
+				Size:    0,
+				Mode:    0755,
+				ModTime: time.Now(),
+				IsDir:   true,
+				Meta:    filesystem.MetaData{Name: PluginName, Type: "directory"},
+			}, nil
 		}
 
 		return nil, filesystem.ErrNotFound
