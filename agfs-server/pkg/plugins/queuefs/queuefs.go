@@ -137,8 +137,10 @@ func (q *QueueFSPlugin) Initialize(cfg map[string]interface{}) error {
 	switch backendType {
 	case "memory":
 		backend = NewMemoryBackend()
-	case "tidb", "mysql", "sqlite", "sqlite3":
-		backend = NewSQLQueueBackend()
+	case "sqlite", "sqlite3":
+		backend = NewSQLiteQueueBackend()
+	case "tidb", "mysql":
+		backend = NewTiDBQueueBackend()
 	default:
 		return fmt.Errorf("unsupported backend: %s", backendType)
 	}

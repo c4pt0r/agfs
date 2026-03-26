@@ -227,10 +227,24 @@ type SQLQueueBackend struct {
 	cacheMu     sync.RWMutex      // protects tableCache
 }
 
-func NewSQLQueueBackend() *SQLQueueBackend {
+func newSQLQueueBackend(backend DBBackend) *SQLQueueBackend {
 	return &SQLQueueBackend{
+		backend:    backend,
 		tableCache: make(map[string]string),
 	}
+}
+
+func NewSQLQueueBackend() *SQLQueueBackend {
+	return newSQLQueueBackend(nil)
+
+}
+
+func NewSQLiteQueueBackend() *SQLQueueBackend {
+	return newSQLQueueBackend(NewSQLiteDBBackend())
+}
+
+func NewTiDBQueueBackend() *SQLQueueBackend {
+	return newSQLQueueBackend(NewTiDBDBBackend())
 }
 
 func (b *SQLQueueBackend) Initialize(config map[string]interface{}) error {
@@ -244,9 +258,13 @@ func (b *SQLQueueBackend) Initialize(config map[string]interface{}) error {
 	b.backendType = backendType
 
 	// Create database backend
-	backend, err := CreateBackend(config)
-	if err != nil {
-		return fmt.Errorf("failed to create backend: %w", err)
+	backend := b.backend
+	if backend == nil {
+		var err error
+		backend, err = CreateBackend(config)
+		if err != nil {
+			return fmt.Errorf("failed to create backend: %w", err)
+		}
 	}
 	b.backend = backend
 
