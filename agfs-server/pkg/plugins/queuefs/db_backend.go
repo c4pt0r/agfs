@@ -22,8 +22,17 @@ type DBBackend interface {
 	// GetInitSQL returns the SQL statements to initialize the schema
 	GetInitSQL() []string
 
-	// GetDriverName returns the driver name
-	GetDriverName() string
+	// SupportsSkipLocked reports whether the backend supports FOR UPDATE SKIP LOCKED.
+	SupportsSkipLocked() bool
+
+	// QueueTableDDL returns the SQL to create a queue table.
+	QueueTableDDL(tableName string) string
+
+	// EnsureQueueIndexes creates any backend-specific queue indexes.
+	EnsureQueueIndexes(db *sql.DB, tableName string) error
+
+	// RegistryInsertSQL returns the SQL used to register a queue.
+	RegistryInsertSQL() string
 }
 
 // SQLiteDBBackend implements DBBackend for SQLite
@@ -31,10 +40,6 @@ type SQLiteDBBackend struct{}
 
 func NewSQLiteDBBackend() *SQLiteDBBackend {
 	return &SQLiteDBBackend{}
-}
-
-func (b *SQLiteDBBackend) GetDriverName() string {
-	return "sqlite3"
 }
 
 func (b *SQLiteDBBackend) Open(cfg map[string]interface{}) (*sql.DB, error) {
@@ -56,24 +61,45 @@ func (b *SQLiteDBBackend) Open(cfg map[string]interface{}) (*sql.DB, error) {
 
 func (b *SQLiteDBBackend) GetInitSQL() []string {
 	return []string{
-		// Queue metadata table to track all queues (including empty ones)
-		`CREATE TABLE IF NOT EXISTS queue_metadata (
+		`CREATE TABLE IF NOT EXISTS queuefs_registry (
 			queue_name TEXT PRIMARY KEY,
-			created_at INTEGER DEFAULT (strftime('%s', 'now')),
-			last_updated INTEGER DEFAULT (strftime('%s', 'now'))
+			table_name TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
-		// Queue messages table
-		`CREATE TABLE IF NOT EXISTS queue_messages (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			queue_name TEXT NOT NULL,
-			message_id TEXT NOT NULL,
-			data TEXT NOT NULL,
-			timestamp INTEGER NOT NULL,
-			created_at INTEGER DEFAULT (strftime('%s', 'now'))
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_queue_name ON queue_messages(queue_name)`,
-		`CREATE INDEX IF NOT EXISTS idx_queue_order ON queue_messages(queue_name, id)`,
 	}
+}
+
+func (b *SQLiteDBBackend) SupportsSkipLocked() bool {
+	return false
+}
+
+func (b *SQLiteDBBackend) QueueTableDDL(tableName string) string {
+	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		message_id TEXT NOT NULL,
+		data BLOB NOT NULL,
+		timestamp INTEGER NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		deleted INTEGER DEFAULT 0,
+		deleted_at DATETIME NULL
+	)`, tableName)
+}
+
+func (b *SQLiteDBBackend) EnsureQueueIndexes(db *sql.DB, tableName string) error {
+	indexSQL := fmt.Sprintf(
+		"CREATE INDEX IF NOT EXISTS idx_%s_deleted_id ON %s(deleted, id)",
+		strings.TrimPrefix(tableName, "queuefs_queue_"),
+		tableName,
+	)
+	_, err := db.Exec(indexSQL)
+	if err != nil {
+		return fmt.Errorf("failed to create queue index: %w", err)
+	}
+	return nil
+}
+
+func (b *SQLiteDBBackend) RegistryInsertSQL() string {
+	return "INSERT OR IGNORE INTO queuefs_registry (queue_name, table_name) VALUES (?, ?)"
 }
 
 // TiDBDBBackend implements DBBackend for TiDB
@@ -81,10 +107,6 @@ type TiDBDBBackend struct{}
 
 func NewTiDBDBBackend() *TiDBDBBackend {
 	return &TiDBDBBackend{}
-}
-
-func (b *TiDBDBBackend) GetDriverName() string {
-	return "mysql"
 }
 
 func (b *TiDBDBBackend) Open(cfg map[string]interface{}) (*sql.DB, error) {
@@ -210,6 +232,31 @@ func (b *TiDBDBBackend) GetInitSQL() []string {
 	}
 }
 
+func (b *TiDBDBBackend) SupportsSkipLocked() bool {
+	return true
+}
+
+func (b *TiDBDBBackend) QueueTableDDL(tableName string) string {
+	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+		id BIGINT AUTO_INCREMENT PRIMARY KEY,
+		message_id VARCHAR(64) NOT NULL,
+		data LONGBLOB NOT NULL,
+		timestamp BIGINT NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		deleted TINYINT(1) DEFAULT 0,
+		deleted_at TIMESTAMP NULL,
+		INDEX idx_deleted_id (deleted, id)
+	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`, tableName)
+}
+
+func (b *TiDBDBBackend) EnsureQueueIndexes(db *sql.DB, tableName string) error {
+	return nil
+}
+
+func (b *TiDBDBBackend) RegistryInsertSQL() string {
+	return "INSERT IGNORE INTO queuefs_registry (queue_name, table_name) VALUES (?, ?)"
+}
+
 // Helper functions
 
 func extractDatabaseName(dsn string, configDB string) string {
@@ -239,20 +286,6 @@ func sanitizeTableName(queueName string) string {
 
 	// Prefix with queuefs_queue_ to avoid conflicts with system tables
 	return "queuefs_queue_" + tableName
-}
-
-// getCreateTableSQL returns the SQL to create a queue table
-func getCreateTableSQL(tableName string) string {
-	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
-		id BIGINT AUTO_INCREMENT PRIMARY KEY,
-		message_id VARCHAR(64) NOT NULL,
-		data LONGBLOB NOT NULL,
-		timestamp BIGINT NOT NULL,
-		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-		deleted TINYINT(1) DEFAULT 0,
-		deleted_at TIMESTAMP NULL,
-		INDEX idx_deleted_id (deleted, id)
-	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`, tableName)
 }
 
 // CreateBackend creates the appropriate database backend

@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -269,10 +268,6 @@ func (b *SQLQueueBackend) Initialize(config map[string]interface{}) error {
 	return nil
 }
 
-func (b *SQLQueueBackend) isSQLite() bool {
-	return b.backend != nil && b.backend.GetDriverName() == "sqlite3"
-}
-
 func (b *SQLQueueBackend) Close() error {
 	if b.db != nil {
 		return b.db.Close()
@@ -375,7 +370,7 @@ func (b *SQLQueueBackend) Dequeue(queueName string) (QueueMessage, bool, error) 
 		"SELECT id, data FROM %s WHERE deleted = 0 ORDER BY id LIMIT 1",
 		tableName,
 	)
-	if !b.isSQLite() {
+	if b.backend.SupportsSkipLocked() {
 		querySQL += " FOR UPDATE SKIP LOCKED"
 	}
 	err = tx.QueryRow(querySQL).Scan(&id, &data)
@@ -636,22 +631,16 @@ func (b *SQLQueueBackend) CreateQueue(queueName string) error {
 	tableName := sanitizeTableName(queueName)
 
 	// Create the queue table
-	createTableSQL := getCreateTableSQL(tableName, b.backend.GetDriverName())
+	createTableSQL := b.backend.QueueTableDDL(tableName)
 	if _, err := b.db.Exec(createTableSQL); err != nil {
 		return fmt.Errorf("failed to create queue table: %w", err)
 	}
-	if b.isSQLite() {
-		indexSQL := fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_%s_deleted_id ON %s(deleted, id)", strings.TrimPrefix(tableName, "queuefs_queue_"), tableName)
-		if _, err := b.db.Exec(indexSQL); err != nil {
-			return fmt.Errorf("failed to create queue index: %w", err)
-		}
+	if err := b.backend.EnsureQueueIndexes(b.db, tableName); err != nil {
+		return err
 	}
 
 	// Register in queuefs_registry
-	registerSQL := "INSERT IGNORE INTO queuefs_registry (queue_name, table_name) VALUES (?, ?)"
-	if b.isSQLite() {
-		registerSQL = "INSERT OR IGNORE INTO queuefs_registry (queue_name, table_name) VALUES (?, ?)"
-	}
+	registerSQL := b.backend.RegistryInsertSQL()
 	_, err := b.db.Exec(registerSQL, queueName, tableName)
 	if err != nil {
 		return fmt.Errorf("failed to register queue: %w", err)
