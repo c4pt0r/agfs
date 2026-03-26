@@ -1,9 +1,13 @@
 package queuefs
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -195,5 +199,66 @@ func TestQueueFSPGSQLConfigMatchesBrewDefaults(t *testing.T) {
 	}
 	if got := config["port"]; got != 5432 && os.Getenv("PG_TEST_PORT") == "" {
 		t.Fatalf("default port = %v, want 5432", got)
+	}
+}
+
+func TestQueueFSPGSQLConcurrentDequeueRegression(t *testing.T) {
+	database := newPGTestDatabaseName()
+	writerFS := newPGTestQueueFS(t, database)
+	readerOne := newPGTestQueueFS(t, database)
+	readerTwo := newPGTestQueueFS(t, database)
+
+	if err := writerFS.Mkdir("/jobs", 0o755); err != nil {
+		t.Fatalf("mkdir /jobs: %v", err)
+	}
+	if _, err := writerFS.Write("/jobs/enqueue", []byte("once"), -1, 0); err != nil {
+		t.Fatalf("enqueue once: %v", err)
+	}
+
+	type dequeueResult struct {
+		payload []byte
+		err     error
+	}
+
+	start := make(chan struct{})
+	results := make(chan dequeueResult, 2)
+	var wg sync.WaitGroup
+	for _, fs := range []*queueFS{readerOne, readerTwo} {
+		wg.Add(1)
+		go func(fs *queueFS) {
+			defer wg.Done()
+			<-start
+			payload, err := fs.Read("/jobs/dequeue", 0, -1)
+			results <- dequeueResult{payload: payload, err: err}
+		}(fs)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	nonEmpty := 0
+	for result := range results {
+		if result.err != nil && !errors.Is(result.err, io.EOF) {
+			t.Fatalf("concurrent dequeue: %v", result.err)
+		}
+		if string(result.payload) == "{}" {
+			continue
+		}
+
+		var msg QueueMessage
+		if err := json.Unmarshal(result.payload, &msg); err != nil {
+			t.Fatalf("unmarshal concurrent dequeue payload: %v (payload=%q)", err, string(result.payload))
+		}
+		if msg.Data != "once" {
+			t.Fatalf("concurrent dequeue returned %q, want once", msg.Data)
+		}
+		nonEmpty++
+	}
+
+	if nonEmpty != 1 {
+		t.Fatalf("concurrent dequeue claimed %d messages, want 1", nonEmpty)
+	}
+	if got := string(mustReadAll(t, writerFS, "/jobs/size")); got != "0" {
+		t.Fatalf("queue size after concurrent dequeue = %q, want 0", got)
 	}
 }
