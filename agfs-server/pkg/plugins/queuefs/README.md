@@ -115,46 +115,36 @@ From `agfs/agfs-server`, run:
 
 ```bash
 TIDB_TEST=1 \
-TIDB_TEST_HOST=127.0.0.1 \
-TIDB_TEST_PORT=4000 \
-TIDB_TEST_USER=root \
+TIDB_TEST_DSN='root@tcp(127.0.0.1:4000)/queuedb?charset=utf8mb4&parseTime=True' \
 go test ./pkg/plugins/queuefs -run 'TestQueueFSTiDB' -count=1 -v
 ```
 
 Notes:
 
 - The TiDB tests are skipped unless `TIDB_TEST=1` is set.
+- `TIDB_TEST_DSN` is required; the tests replace the database name in that DSN with a fresh per-test database.
 - The tests create a fresh database name for each run, so they do not reuse prior queue tables.
-- If your TiDB instance requires a password, add `TIDB_TEST_PASSWORD=...` to the command.
 - The current TiDB regression coverage lives in `agfs-server/pkg/plugins/queuefs/tidb_backend_test.go`.
 
 ## Running PostgreSQL Tests
 
 `queuefs` also includes gated integration tests for the PostgreSQL backend.
 
-For a local Homebrew PostgreSQL instance, you can confirm the installation with:
-
-```bash
-brew info postgresql@17
-```
-
-On this machine, the default service is available at `127.0.0.1:5432` and accepts the current macOS user.
+The default PostgreSQL service is available at `127.0.0.1:5432`.
 
 From `agfs/agfs-server`, run:
 
 ```bash
 PG_TEST=1 \
-PG_TEST_HOST=127.0.0.1 \
-PG_TEST_PORT=5432 \
-PG_TEST_USER="$USER" \
+PG_TEST_DSN="postgresql://${USER}@127.0.0.1:5432/postgres?sslmode=disable" \
 go test ./pkg/plugins/queuefs -run 'TestQueueFSPGSQL' -count=1 -v
 ```
 
 Notes:
 
 - The PostgreSQL tests are skipped unless `PG_TEST=1` is set.
+- `PG_TEST_DSN` is required; the tests replace the database name in that DSN with a fresh per-test database.
 - The tests create a fresh database name for each run, so they do not reuse prior queue tables.
-- If your PostgreSQL instance requires a password, add `PG_TEST_PASSWORD=...` to the command.
 - The current PostgreSQL regression coverage lives in `agfs-server/pkg/plugins/queuefs/pgsql_backend_test.go`.
 
 ## License

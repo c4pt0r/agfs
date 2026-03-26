@@ -320,7 +320,10 @@ func (b *PostgreSQLDBBackend) Open(cfg map[string]interface{}) (*sql.DB, error) 
 		}
 	}
 
-	adminDSN := config.GetStringConfig(cfg, "dsn", "")
+	adminDSN := config.GetStringConfig(cfg, "admin_dsn", "")
+	if adminDSN == "" {
+		adminDSN = config.GetStringConfig(cfg, "dsn", "")
+	}
 	if adminDSN == "" && database != "" {
 		host := config.GetStringConfig(cfg, "host", "127.0.0.1")
 		port := config.GetStringConfig(cfg, "port", "5432")
@@ -338,7 +341,9 @@ func (b *PostgreSQLDBBackend) Open(cfg map[string]interface{}) (*sql.DB, error) 
 		if password != "" {
 			adminDSN += fmt.Sprintf(" password=%s", password)
 		}
+	}
 
+	if adminDSN != "" && database != "" {
 		tempDB, err := sql.Open("pgx", adminDSN)
 		if err == nil {
 			defer tempDB.Close()

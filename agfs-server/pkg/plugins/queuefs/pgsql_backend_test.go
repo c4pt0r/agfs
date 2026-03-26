@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -19,35 +19,43 @@ func pgTestConfig(t *testing.T, database string) map[string]interface{} {
 		t.Skip("set PG_TEST=1 to run PostgreSQL integration tests")
 	}
 
-	host := os.Getenv("PG_TEST_HOST")
-	if host == "" {
-		host = "127.0.0.1"
+	dsn := os.Getenv("PG_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set PG_TEST_DSN to run PostgreSQL integration tests")
 	}
 
-	port := 5432
-	if rawPort := os.Getenv("PG_TEST_PORT"); rawPort != "" {
-		parsedPort, err := strconv.Atoi(rawPort)
-		if err != nil {
-			t.Fatalf("parse PG_TEST_PORT: %v", err)
-		}
-		port = parsedPort
+	parsedURL, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse PG_TEST_DSN: %v", err)
 	}
+	parsedURL.Path = "/" + database
+	query := parsedURL.Query()
+	if query.Get("sslmode") == "" {
+		query.Set("sslmode", "require")
+	}
+	parsedURL.RawQuery = query.Encode()
 
-	user := os.Getenv("PG_TEST_USER")
-	if user == "" {
-		user = os.Getenv("USER")
-	}
-	if user == "" {
-		user = "postgres"
+	adminURL := *parsedURL
+	adminURL.Path = "/postgres"
+
+	adminDSN := adminURL.String()
+	password, _ := parsedURL.User.Password()
+	user := parsedURL.User.Username()
+	port := parsedURL.Port()
+	host := parsedURL.Hostname()
+	if port == "" {
+		port = "5432"
 	}
 
 	return map[string]interface{}{
-		"backend":  "pgsql",
-		"host":     host,
-		"port":     port,
-		"user":     user,
-		"password": os.Getenv("PG_TEST_PASSWORD"),
-		"database": database,
+		"backend":   "pgsql",
+		"dsn":       parsedURL.String(),
+		"host":      host,
+		"port":      port,
+		"user":      user,
+		"password":  password,
+		"database":  database,
+		"admin_dsn": adminDSN,
 	}
 }
 
@@ -188,17 +196,14 @@ func TestQueueFSPGSQLPersistenceRegression(t *testing.T) {
 	}
 }
 
-func TestQueueFSPGSQLConfigMatchesBrewDefaults(t *testing.T) {
+func TestQueueFSPGSQLConfigUsesDSN(t *testing.T) {
 	if os.Getenv("PG_TEST") == "" {
 		t.Skip("set PG_TEST=1 to run PostgreSQL integration tests")
 	}
 
 	config := pgTestConfig(t, newPGTestDatabaseName())
-	if got := config["host"]; got != "127.0.0.1" && os.Getenv("PG_TEST_HOST") == "" {
-		t.Fatalf("default host = %v, want 127.0.0.1", got)
-	}
-	if got := config["port"]; got != 5432 && os.Getenv("PG_TEST_PORT") == "" {
-		t.Fatalf("default port = %v, want 5432", got)
+	if _, ok := config["dsn"].(string); !ok || config["dsn"] == "" {
+		t.Fatalf("expected non-empty dsn in config: %+v", config)
 	}
 }
 

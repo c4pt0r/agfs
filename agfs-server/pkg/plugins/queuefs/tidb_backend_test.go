@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
-	"strconv"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/go-sql-driver/mysql"
 )
 
 func tidbTestConfig(t *testing.T, database string) map[string]interface{} {
@@ -20,31 +20,23 @@ func tidbTestConfig(t *testing.T, database string) map[string]interface{} {
 		t.Skip("set TIDB_TEST=1 to run TiDB integration tests")
 	}
 
-	host := os.Getenv("TIDB_TEST_HOST")
-	if host == "" {
-		host = "127.0.0.1"
+	dsn := os.Getenv("TIDB_TEST_DSN")
+	if dsn == "" {
+		t.Skip("set TIDB_TEST_DSN to run TiDB integration tests")
 	}
 
-	port := 4000
-	if rawPort := os.Getenv("TIDB_TEST_PORT"); rawPort != "" {
-		parsedPort, err := strconv.Atoi(rawPort)
-		if err != nil {
-			t.Fatalf("parse TIDB_TEST_PORT: %v", err)
-		}
-		port = parsedPort
+	parsedDSN, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("parse TIDB_TEST_DSN: %v", err)
 	}
-
-	user := os.Getenv("TIDB_TEST_USER")
-	if user == "" {
-		user = "root"
+	parsedDSN.DBName = database
+	if parsedDSN.Params == nil {
+		parsedDSN.Params = map[string]string{}
 	}
 
 	return map[string]interface{}{
 		"backend":  "tidb",
-		"host":     host,
-		"port":     port,
-		"user":     user,
-		"password": os.Getenv("TIDB_TEST_PASSWORD"),
+		"dsn":      parsedDSN.FormatDSN(),
 		"database": database,
 	}
 }
@@ -188,17 +180,14 @@ func TestQueueFSTiDBPersistenceRegression(t *testing.T) {
 	}
 }
 
-func TestQueueFSTiDBConfigMatchesPlayground(t *testing.T) {
+func TestQueueFSTiDBConfigUsesDSN(t *testing.T) {
 	if os.Getenv("TIDB_TEST") == "" {
 		t.Skip("set TIDB_TEST=1 to run TiDB integration tests")
 	}
 
-	config := tidbTestConfig(t, filepath.Base(newTiDBTestDatabaseName(t)))
-	if got := config["host"]; got != "127.0.0.1" && os.Getenv("TIDB_TEST_HOST") == "" {
-		t.Fatalf("default host = %v, want 127.0.0.1", got)
-	}
-	if got := config["port"]; got != 4000 && os.Getenv("TIDB_TEST_PORT") == "" {
-		t.Fatalf("default port = %v, want 4000", got)
+	config := tidbTestConfig(t, newTiDBTestDatabaseName(t))
+	if _, ok := config["dsn"].(string); !ok || config["dsn"] == "" {
+		t.Fatalf("expected non-empty dsn in config: %+v", config)
 	}
 }
 
