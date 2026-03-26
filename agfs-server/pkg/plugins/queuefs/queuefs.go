@@ -138,7 +138,7 @@ func (q *QueueFSPlugin) Initialize(cfg map[string]interface{}) error {
 	case "memory":
 		backend = NewMemoryBackend()
 	case "tidb", "mysql", "sqlite", "sqlite3":
-		backend = NewTiDBBackend()
+		backend = NewSQLQueueBackend()
 	default:
 		return fmt.Errorf("unsupported backend: %s", backendType)
 	}
@@ -1028,9 +1028,9 @@ type queueFileHandle struct {
 
 // handleManager manages open handles for queueFS
 type handleManager struct {
-	handles  map[int64]*queueFileHandle
-	nextID   int64
-	mu       sync.Mutex
+	handles map[int64]*queueFileHandle
+	nextID  int64
+	mu      sync.Mutex
 }
 
 // Global handle manager for queueFS (per plugin instance would be better, but keeping it simple)

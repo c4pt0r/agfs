@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -218,8 +219,8 @@ func (b *MemoryBackend) QueueExists(queueName string) (bool, error) {
 	return exists, nil
 }
 
-// TiDBBackend implements QueueBackend using TiDB database
-type TiDBBackend struct {
+// SQLQueueBackend implements QueueBackend using a SQL database.
+type SQLQueueBackend struct {
 	db          *sql.DB
 	backend     DBBackend
 	backendType string
@@ -227,13 +228,13 @@ type TiDBBackend struct {
 	cacheMu     sync.RWMutex      // protects tableCache
 }
 
-func NewTiDBBackend() *TiDBBackend {
-	return &TiDBBackend{
+func NewSQLQueueBackend() *SQLQueueBackend {
+	return &SQLQueueBackend{
 		tableCache: make(map[string]string),
 	}
 }
 
-func (b *TiDBBackend) Initialize(config map[string]interface{}) error {
+func (b *SQLQueueBackend) Initialize(config map[string]interface{}) error {
 	// Store backend type from config
 	backendType := "memory" // default
 	if val, ok := config["backend"]; ok {
@@ -268,20 +269,24 @@ func (b *TiDBBackend) Initialize(config map[string]interface{}) error {
 	return nil
 }
 
-func (b *TiDBBackend) Close() error {
+func (b *SQLQueueBackend) isSQLite() bool {
+	return b.backend != nil && b.backend.GetDriverName() == "sqlite3"
+}
+
+func (b *SQLQueueBackend) Close() error {
 	if b.db != nil {
 		return b.db.Close()
 	}
 	return nil
 }
 
-func (b *TiDBBackend) GetType() string {
+func (b *SQLQueueBackend) GetType() string {
 	return b.backendType
 }
 
 // getTableName retrieves the table name for a queue, using cache when possible
 // If forceRefresh is true, it will bypass the cache and query from database
-func (b *TiDBBackend) getTableName(queueName string, forceRefresh bool) (string, error) {
+func (b *SQLQueueBackend) getTableName(queueName string, forceRefresh bool) (string, error) {
 	// Try to get from cache first (unless force refresh)
 	if !forceRefresh {
 		b.cacheMu.RLock()
@@ -312,13 +317,13 @@ func (b *TiDBBackend) getTableName(queueName string, forceRefresh bool) (string,
 }
 
 // invalidateCache removes a queue from the cache
-func (b *TiDBBackend) invalidateCache(queueName string) {
+func (b *SQLQueueBackend) invalidateCache(queueName string) {
 	b.cacheMu.Lock()
 	delete(b.tableCache, queueName)
 	b.cacheMu.Unlock()
 }
 
-func (b *TiDBBackend) Enqueue(queueName string, msg QueueMessage) error {
+func (b *SQLQueueBackend) Enqueue(queueName string, msg QueueMessage) error {
 	msgData, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal message: %w", err)
@@ -345,7 +350,7 @@ func (b *TiDBBackend) Enqueue(queueName string, msg QueueMessage) error {
 	return nil
 }
 
-func (b *TiDBBackend) Dequeue(queueName string) (QueueMessage, bool, error) {
+func (b *SQLQueueBackend) Dequeue(queueName string) (QueueMessage, bool, error) {
 	// Get table name from cache (lazy loading)
 	tableName, err := b.getTableName(queueName, false)
 	if err == sql.ErrNoRows {
@@ -367,9 +372,12 @@ func (b *TiDBBackend) Dequeue(queueName string) (QueueMessage, bool, error) {
 	var data string
 
 	querySQL := fmt.Sprintf(
-		"SELECT id, data FROM %s WHERE deleted = 0 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED",
+		"SELECT id, data FROM %s WHERE deleted = 0 ORDER BY id LIMIT 1",
 		tableName,
 	)
+	if !b.isSQLite() {
+		querySQL += " FOR UPDATE SKIP LOCKED"
+	}
 	err = tx.QueryRow(querySQL).Scan(&id, &data)
 
 	if err == sql.ErrNoRows {
@@ -380,12 +388,19 @@ func (b *TiDBBackend) Dequeue(queueName string) (QueueMessage, bool, error) {
 
 	// Mark the message as deleted
 	updateSQL := fmt.Sprintf(
-		"UPDATE %s SET deleted = 1, deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
+		"UPDATE %s SET deleted = 1, deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted = 0",
 		tableName,
 	)
-	_, err = tx.Exec(updateSQL, id)
+	result, err := tx.Exec(updateSQL, id)
 	if err != nil {
 		return QueueMessage{}, false, fmt.Errorf("failed to mark message as deleted: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return QueueMessage{}, false, fmt.Errorf("failed to check dequeue result: %w", err)
+	}
+	if rowsAffected == 0 {
+		return QueueMessage{}, false, nil
 	}
 
 	// Commit transaction
@@ -402,7 +417,7 @@ func (b *TiDBBackend) Dequeue(queueName string) (QueueMessage, bool, error) {
 	return msg, true, nil
 }
 
-func (b *TiDBBackend) Peek(queueName string) (QueueMessage, bool, error) {
+func (b *SQLQueueBackend) Peek(queueName string) (QueueMessage, bool, error) {
 	// Get table name from cache (lazy loading)
 	tableName, err := b.getTableName(queueName, false)
 	if err == sql.ErrNoRows {
@@ -433,7 +448,7 @@ func (b *TiDBBackend) Peek(queueName string) (QueueMessage, bool, error) {
 	return msg, true, nil
 }
 
-func (b *TiDBBackend) Size(queueName string) (int, error) {
+func (b *SQLQueueBackend) Size(queueName string) (int, error) {
 	// Get table name from cache (lazy loading)
 	tableName, err := b.getTableName(queueName, false)
 	if err == sql.ErrNoRows {
@@ -454,7 +469,7 @@ func (b *TiDBBackend) Size(queueName string) (int, error) {
 	return count, nil
 }
 
-func (b *TiDBBackend) Clear(queueName string) error {
+func (b *SQLQueueBackend) Clear(queueName string) error {
 	// Get table name from cache (lazy loading)
 	tableName, err := b.getTableName(queueName, false)
 	if err == sql.ErrNoRows {
@@ -472,7 +487,7 @@ func (b *TiDBBackend) Clear(queueName string) error {
 	return nil
 }
 
-func (b *TiDBBackend) ListQueues(prefix string) ([]string, error) {
+func (b *SQLQueueBackend) ListQueues(prefix string) ([]string, error) {
 	// Query from registry table to include all queues
 	var query string
 	var args []interface{}
@@ -502,7 +517,7 @@ func (b *TiDBBackend) ListQueues(prefix string) ([]string, error) {
 	return queues, nil
 }
 
-func (b *TiDBBackend) GetLastEnqueueTime(queueName string) (time.Time, error) {
+func (b *SQLQueueBackend) GetLastEnqueueTime(queueName string) (time.Time, error) {
 	// Get table name from cache (lazy loading)
 	tableName, err := b.getTableName(queueName, false)
 	if err == sql.ErrNoRows {
@@ -527,7 +542,7 @@ func (b *TiDBBackend) GetLastEnqueueTime(queueName string) (time.Time, error) {
 	return time.Unix(timestamp, 0), nil
 }
 
-func (b *TiDBBackend) RemoveQueue(queueName string) error {
+func (b *SQLQueueBackend) RemoveQueue(queueName string) error {
 	if queueName == "" {
 		// Remove all queues: drop all queue tables and clear registry
 		rows, err := b.db.Query("SELECT queue_name, table_name FROM queuefs_registry")
@@ -616,21 +631,28 @@ func (b *TiDBBackend) RemoveQueue(queueName string) error {
 	return err
 }
 
-func (b *TiDBBackend) CreateQueue(queueName string) error {
+func (b *SQLQueueBackend) CreateQueue(queueName string) error {
 	// Generate table name
 	tableName := sanitizeTableName(queueName)
 
 	// Create the queue table
-	createTableSQL := getCreateTableSQL(tableName)
+	createTableSQL := getCreateTableSQL(tableName, b.backend.GetDriverName())
 	if _, err := b.db.Exec(createTableSQL); err != nil {
 		return fmt.Errorf("failed to create queue table: %w", err)
 	}
+	if b.isSQLite() {
+		indexSQL := fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_%s_deleted_id ON %s(deleted, id)", strings.TrimPrefix(tableName, "queuefs_queue_"), tableName)
+		if _, err := b.db.Exec(indexSQL); err != nil {
+			return fmt.Errorf("failed to create queue index: %w", err)
+		}
+	}
 
 	// Register in queuefs_registry
-	_, err := b.db.Exec(
-		"INSERT IGNORE INTO queuefs_registry (queue_name, table_name) VALUES (?, ?)",
-		queueName, tableName,
-	)
+	registerSQL := "INSERT IGNORE INTO queuefs_registry (queue_name, table_name) VALUES (?, ?)"
+	if b.isSQLite() {
+		registerSQL = "INSERT OR IGNORE INTO queuefs_registry (queue_name, table_name) VALUES (?, ?)"
+	}
+	_, err := b.db.Exec(registerSQL, queueName, tableName)
 	if err != nil {
 		return fmt.Errorf("failed to register queue: %w", err)
 	}
@@ -644,7 +666,7 @@ func (b *TiDBBackend) CreateQueue(queueName string) error {
 	return nil
 }
 
-func (b *TiDBBackend) QueueExists(queueName string) (bool, error) {
+func (b *SQLQueueBackend) QueueExists(queueName string) (bool, error) {
 	// Check cache first
 	b.cacheMu.RLock()
 	_, exists := b.tableCache[queueName]
