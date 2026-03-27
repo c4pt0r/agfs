@@ -213,57 +213,57 @@ NESTED QUEUES:
 BACKENDS:
 
   Memory Backend (default):
-  [plugins.queuefs]
-  enabled = true
-  path = "/queuefs"
-  # No additional config needed for memory backend
+    [plugins.queuefs]
+    enabled = true
+    path = "/queuefs"
+    # No additional config needed for memory backend
 
   SQLite Backend:
-  [plugins.queuefs]
-  enabled = true
-  path = "/queuefs"
+    [plugins.queuefs]
+    enabled = true
+    path = "/queuefs"
 
     [plugins.queuefs.config]
-     backend = "sqlite"
-     db_path = "queue.db"
+    backend = "sqlite"
+    db_path = "queue.db"
 
   PostgreSQL Backend (local):
-  [plugins.queuefs]
-  enabled = true
-  path = "/queuefs"
+    [plugins.queuefs]
+    enabled = true
+    path = "/queuefs"
 
-	    [plugins.queuefs.config]
-	    backend = "pgsql"
-	    host = "127.0.0.1"
-	    port = 5432
-	    user = "postgres"
-	    password = ""
-	    database = "queuedb"
+    [plugins.queuefs.config]
+    backend = "pgsql"
+    host = "127.0.0.1"
+    port = 5432
+    user = "postgres"
+    password = ""
+    database = "queuedb"
 
   TiDB Backend (local):
-  [plugins.queuefs]
-  enabled = true
-  path = "/queuefs"
+    [plugins.queuefs]
+    enabled = true
+    path = "/queuefs"
 
     [plugins.queuefs.config]
     backend = "tidb"
     host = "127.0.0.1"
-    port = "4000"
+    port = 4000
     user = "root"
     password = ""
     database = "queuedb"
 
   TiDB Cloud Backend (with TLS):
-  [plugins.queuefs]
-  enabled = true
-  path = "/queuefs"
+    [plugins.queuefs]
+    enabled = true
+    path = "/queuefs"
 
     [plugins.queuefs.config]
     backend = "tidb"
     user = "3YdGXuXNdAEmP1f.root"
     password = "your_password"
     host = "gateway01.us-west-2.prod.aws.tidbcloud.com"
-    port = "4000"
+    port = 4000
     database = "queuedb"
     enable_tls = true
     tls_server_name = "gateway01.us-west-2.prod.aws.tidbcloud.com"
