@@ -84,7 +84,7 @@ func (q *QueueFSPlugin) Validate(cfg map[string]interface{}) error {
 	allowedKeys := []string{
 		"backend", "mount_path",
 		// Database-related keys
-		"db_path", "dsn", "user", "password", "host", "port", "database",
+		"db_path", "dsn", "admin_dsn", "user", "password", "host", "port", "database",
 		"enable_tls", "tls_server_name", "tls_skip_verify",
 	}
 	if err := config.ValidateOnlyKnownKeys(cfg, allowedKeys); err != nil {
@@ -109,7 +109,7 @@ func (q *QueueFSPlugin) Validate(cfg map[string]interface{}) error {
 
 	// Validate database-related parameters if backend is not memory
 	if backendType != "memory" {
-		for _, key := range []string{"db_path", "dsn", "user", "password", "host", "database", "tls_server_name"} {
+		for _, key := range []string{"db_path", "dsn", "admin_dsn", "user", "password", "host", "database", "tls_server_name"} {
 			if err := config.ValidateStringType(cfg, key); err != nil {
 				return err
 			}
@@ -232,13 +232,13 @@ BACKENDS:
   enabled = true
   path = "/queuefs"
 
-    [plugins.queuefs.config]
-    backend = "pgsql"
-    host = "127.0.0.1"
-    port = "5432"
-    user = "postgres"
-    password = ""
-    database = "queuedb"
+	    [plugins.queuefs.config]
+	    backend = "pgsql"
+	    host = "127.0.0.1"
+	    port = 5432
+	    user = "postgres"
+	    password = ""
+	    database = "queuedb"
 
   TiDB Backend (local):
   [plugins.queuefs]
@@ -324,6 +324,13 @@ func (q *QueueFSPlugin) GetConfigParams() []plugin.ConfigParameter {
 			Required:    false,
 			Default:     "",
 			Description: "Database connection string (DSN)",
+		},
+		{
+			Name:        "admin_dsn",
+			Type:        "string",
+			Required:    false,
+			Default:     "",
+			Description: "Administrative DSN used to create the target database when it does not exist",
 		},
 		{
 			Name:        "user",

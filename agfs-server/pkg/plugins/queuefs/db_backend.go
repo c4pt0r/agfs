@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"database/sql"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -296,8 +297,11 @@ func NewPostgreSQLDBBackend() *PostgreSQLDBBackend {
 
 func (b *PostgreSQLDBBackend) Open(cfg map[string]interface{}) (*sql.DB, error) {
 	dsn := config.GetStringConfig(cfg, "dsn", "")
-	database := config.GetStringConfig(cfg, "database", "queuedb")
+	database := config.GetStringConfig(cfg, "database", "")
 	if dsn == "" {
+		if database == "" {
+			database = "queuedb"
+		}
 		host := config.GetStringConfig(cfg, "host", "127.0.0.1")
 		port := config.GetStringConfig(cfg, "port", "5432")
 		user := config.GetStringConfig(cfg, "user", "postgres")
@@ -320,26 +324,43 @@ func (b *PostgreSQLDBBackend) Open(cfg map[string]interface{}) (*sql.DB, error) 
 		}
 	}
 
-	adminDSN := config.GetStringConfig(cfg, "admin_dsn", "")
-	if adminDSN == "" {
-		adminDSN = config.GetStringConfig(cfg, "dsn", "")
-	}
-	if adminDSN == "" && database != "" {
-		host := config.GetStringConfig(cfg, "host", "127.0.0.1")
-		port := config.GetStringConfig(cfg, "port", "5432")
-		user := config.GetStringConfig(cfg, "user", "postgres")
-		password := config.GetStringConfig(cfg, "password", "")
-		sslMode := "disable"
-		if config.GetBoolConfig(cfg, "enable_tls", false) {
-			sslMode = "require"
-			if config.GetBoolConfig(cfg, "tls_skip_verify", false) {
-				sslMode = "prefer"
-			}
+	parsedDSN, err := url.Parse(dsn)
+	if err == nil {
+		if database == "" {
+			database = strings.TrimPrefix(parsedDSN.Path, "/")
 		}
-		adminDSN = fmt.Sprintf("host=%s port=%s user=%s dbname=postgres sslmode=%s",
-			host, port, user, sslMode)
-		if password != "" {
-			adminDSN += fmt.Sprintf(" password=%s", password)
+		if database == "" {
+			database = "postgres"
+		}
+		parsedDSN.Path = "/" + database
+		dsn = parsedDSN.String()
+	} else if database == "" {
+		database = "queuedb"
+	}
+
+	adminDSN := config.GetStringConfig(cfg, "admin_dsn", "")
+	if adminDSN == "" && database != "" {
+		if parsedDSN != nil {
+			adminURL := *parsedDSN
+			adminURL.Path = "/postgres"
+			adminDSN = adminURL.String()
+		} else {
+			host := config.GetStringConfig(cfg, "host", "127.0.0.1")
+			port := config.GetStringConfig(cfg, "port", "5432")
+			user := config.GetStringConfig(cfg, "user", "postgres")
+			password := config.GetStringConfig(cfg, "password", "")
+			sslMode := "disable"
+			if config.GetBoolConfig(cfg, "enable_tls", false) {
+				sslMode = "require"
+				if config.GetBoolConfig(cfg, "tls_skip_verify", false) {
+					sslMode = "prefer"
+				}
+			}
+			adminDSN = fmt.Sprintf("host=%s port=%s user=%s dbname=postgres sslmode=%s",
+				host, port, user, sslMode)
+			if password != "" {
+				adminDSN += fmt.Sprintf(" password=%s", password)
+			}
 		}
 	}
 

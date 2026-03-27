@@ -116,8 +116,14 @@ func TestQueueFSRootAndNestedQueueRegression(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readdir /jobs: %v", err)
 	}
-	if got := queueDirEntryNames(jobsEntries); len(got) != 5 {
+	got := queueDirEntryNames(jobsEntries)
+	if len(got) != 5 {
 		t.Fatalf("unexpected /jobs control files: %+v", jobsEntries)
+	}
+	for _, name := range []string{"enqueue", "dequeue", "peek", "size", "clear"} {
+		if _, ok := got[name]; !ok {
+			t.Fatalf("/jobs missing control file %q in %+v", name, jobsEntries)
+		}
 	}
 
 	logsEntries, err := fs.ReadDir("/logs")

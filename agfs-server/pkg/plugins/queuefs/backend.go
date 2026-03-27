@@ -564,20 +564,24 @@ func (b *SQLQueueBackend) GetLastEnqueueTime(queueName string) (time.Time, error
 		return time.Time{}, fmt.Errorf("failed to get queue table name: %w", err)
 	}
 
-	var timestamp int64
+	var timestamp sql.NullInt64
 	querySQL := fmt.Sprintf(
 		"SELECT MAX(timestamp) FROM %s WHERE deleted = %s",
 		tableName, b.boolLiteral(false),
 	)
 	err = b.db.QueryRow(querySQL).Scan(&timestamp)
 
-	if err == sql.ErrNoRows || timestamp == 0 {
-		return time.Time{}, nil
-	} else if err != nil {
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return time.Time{}, nil
+		}
 		return time.Time{}, fmt.Errorf("failed to get last enqueue time: %w", err)
 	}
+	if !timestamp.Valid || timestamp.Int64 == 0 {
+		return time.Time{}, nil
+	}
 
-	return time.Unix(timestamp, 0), nil
+	return time.Unix(timestamp.Int64, 0), nil
 }
 
 func (b *SQLQueueBackend) RemoveQueue(queueName string) error {
