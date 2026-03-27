@@ -218,8 +218,8 @@ func (b *MemoryBackend) QueueExists(queueName string) (bool, error) {
 	return exists, nil
 }
 
-// TiDBBackend implements QueueBackend using TiDB database
-type TiDBBackend struct {
+// SQLQueueBackend implements QueueBackend using a SQL database.
+type SQLQueueBackend struct {
 	db          *sql.DB
 	backend     DBBackend
 	backendType string
@@ -227,26 +227,52 @@ type TiDBBackend struct {
 	cacheMu     sync.RWMutex      // protects tableCache
 }
 
-func NewTiDBBackend() *TiDBBackend {
-	return &TiDBBackend{
-		tableCache: make(map[string]string),
+func newSQLQueueBackend(backendType string, backend DBBackend) *SQLQueueBackend {
+	return &SQLQueueBackend{
+		backendType: backendType,
+		backend:     backend,
+		tableCache:  make(map[string]string),
 	}
 }
 
-func (b *TiDBBackend) Initialize(config map[string]interface{}) error {
-	// Store backend type from config
-	backendType := "memory" // default
-	if val, ok := config["backend"]; ok {
-		if strVal, ok := val.(string); ok {
-			backendType = strVal
+func NewSQLQueueBackend() *SQLQueueBackend {
+	return newSQLQueueBackend("", nil)
+}
+
+func NewSQLiteQueueBackend() *SQLQueueBackend {
+	return newSQLQueueBackend("sqlite", NewSQLiteDBBackend())
+}
+
+func NewTiDBQueueBackend() *SQLQueueBackend {
+	return newSQLQueueBackend("tidb", NewTiDBDBBackend())
+}
+
+func NewPostgresQueueBackend() *SQLQueueBackend {
+	return newSQLQueueBackend("pgsql", NewPostgreSQLDBBackend())
+}
+
+func (b *SQLQueueBackend) Initialize(config map[string]interface{}) error {
+	backendType := b.backendType
+	if backendType == "" {
+		if val, ok := config["backend"]; ok {
+			if strVal, ok := val.(string); ok {
+				backendType = strVal
+			}
 		}
+	}
+	if backendType == "" || backendType == "memory" {
+		return fmt.Errorf("SQLQueueBackend requires a SQL backend (sqlite, tidb/mysql, pgsql/postgres); use MemoryBackend for in-memory mode")
 	}
 	b.backendType = backendType
 
 	// Create database backend
-	backend, err := CreateBackend(config)
-	if err != nil {
-		return fmt.Errorf("failed to create backend: %w", err)
+	backend := b.backend
+	if backend == nil {
+		var err error
+		backend, err = CreateBackend(config)
+		if err != nil {
+			return fmt.Errorf("failed to create backend: %w", err)
+		}
 	}
 	b.backend = backend
 
@@ -268,20 +294,37 @@ func (b *TiDBBackend) Initialize(config map[string]interface{}) error {
 	return nil
 }
 
-func (b *TiDBBackend) Close() error {
+func (b *SQLQueueBackend) Close() error {
 	if b.db != nil {
 		return b.db.Close()
 	}
 	return nil
 }
 
-func (b *TiDBBackend) GetType() string {
+func (b *SQLQueueBackend) GetType() string {
 	return b.backendType
+}
+
+func (b *SQLQueueBackend) rebind(query string) string {
+	if b.backend == nil {
+		return query
+	}
+	return b.backend.Rebind(query)
+}
+
+func (b *SQLQueueBackend) boolLiteral(value bool) string {
+	if b.backend == nil {
+		if value {
+			return "1"
+		}
+		return "0"
+	}
+	return b.backend.BoolLiteral(value)
 }
 
 // getTableName retrieves the table name for a queue, using cache when possible
 // If forceRefresh is true, it will bypass the cache and query from database
-func (b *TiDBBackend) getTableName(queueName string, forceRefresh bool) (string, error) {
+func (b *SQLQueueBackend) getTableName(queueName string, forceRefresh bool) (string, error) {
 	// Try to get from cache first (unless force refresh)
 	if !forceRefresh {
 		b.cacheMu.RLock()
@@ -295,7 +338,7 @@ func (b *TiDBBackend) getTableName(queueName string, forceRefresh bool) (string,
 	// Query from database
 	var tableName string
 	err := b.db.QueryRow(
-		"SELECT table_name FROM queuefs_registry WHERE queue_name = ?",
+		b.rebind("SELECT table_name FROM queuefs_registry WHERE queue_name = ?"),
 		queueName,
 	).Scan(&tableName)
 
@@ -312,13 +355,13 @@ func (b *TiDBBackend) getTableName(queueName string, forceRefresh bool) (string,
 }
 
 // invalidateCache removes a queue from the cache
-func (b *TiDBBackend) invalidateCache(queueName string) {
+func (b *SQLQueueBackend) invalidateCache(queueName string) {
 	b.cacheMu.Lock()
 	delete(b.tableCache, queueName)
 	b.cacheMu.Unlock()
 }
 
-func (b *TiDBBackend) Enqueue(queueName string, msg QueueMessage) error {
+func (b *SQLQueueBackend) Enqueue(queueName string, msg QueueMessage) error {
 	msgData, err := json.Marshal(msg)
 	if err != nil {
 		return fmt.Errorf("failed to marshal message: %w", err)
@@ -334,9 +377,10 @@ func (b *TiDBBackend) Enqueue(queueName string, msg QueueMessage) error {
 
 	// Insert message into queue table
 	insertSQL := fmt.Sprintf(
-		"INSERT INTO %s (message_id, data, timestamp, deleted) VALUES (?, ?, ?, 0)",
-		tableName,
+		"INSERT INTO %s (message_id, data, timestamp, deleted) VALUES (?, ?, ?, %s)",
+		tableName, b.boolLiteral(false),
 	)
+	insertSQL = b.rebind(insertSQL)
 	_, err = b.db.Exec(insertSQL, msg.ID, string(msgData), msg.Timestamp.Unix())
 	if err != nil {
 		return fmt.Errorf("failed to enqueue message: %w", err)
@@ -345,7 +389,7 @@ func (b *TiDBBackend) Enqueue(queueName string, msg QueueMessage) error {
 	return nil
 }
 
-func (b *TiDBBackend) Dequeue(queueName string) (QueueMessage, bool, error) {
+func (b *SQLQueueBackend) Dequeue(queueName string) (QueueMessage, bool, error) {
 	// Get table name from cache (lazy loading)
 	tableName, err := b.getTableName(queueName, false)
 	if err == sql.ErrNoRows {
@@ -367,9 +411,13 @@ func (b *TiDBBackend) Dequeue(queueName string) (QueueMessage, bool, error) {
 	var data string
 
 	querySQL := fmt.Sprintf(
-		"SELECT id, data FROM %s WHERE deleted = 0 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED",
-		tableName,
+		"SELECT id, data FROM %s WHERE deleted = %s ORDER BY id LIMIT 1",
+		tableName, b.boolLiteral(false),
 	)
+	if b.backend.SupportsSkipLocked() {
+		querySQL += " FOR UPDATE SKIP LOCKED"
+	}
+	querySQL = b.rebind(querySQL)
 	err = tx.QueryRow(querySQL).Scan(&id, &data)
 
 	if err == sql.ErrNoRows {
@@ -380,12 +428,20 @@ func (b *TiDBBackend) Dequeue(queueName string) (QueueMessage, bool, error) {
 
 	// Mark the message as deleted
 	updateSQL := fmt.Sprintf(
-		"UPDATE %s SET deleted = 1, deleted_at = CURRENT_TIMESTAMP WHERE id = ?",
-		tableName,
+		"UPDATE %s SET deleted = %s, deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted = %s",
+		tableName, b.boolLiteral(true), b.boolLiteral(false),
 	)
-	_, err = tx.Exec(updateSQL, id)
+	updateSQL = b.rebind(updateSQL)
+	result, err := tx.Exec(updateSQL, id)
 	if err != nil {
 		return QueueMessage{}, false, fmt.Errorf("failed to mark message as deleted: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return QueueMessage{}, false, fmt.Errorf("failed to check dequeue result: %w", err)
+	}
+	if rowsAffected == 0 {
+		return QueueMessage{}, false, nil
 	}
 
 	// Commit transaction
@@ -402,7 +458,7 @@ func (b *TiDBBackend) Dequeue(queueName string) (QueueMessage, bool, error) {
 	return msg, true, nil
 }
 
-func (b *TiDBBackend) Peek(queueName string) (QueueMessage, bool, error) {
+func (b *SQLQueueBackend) Peek(queueName string) (QueueMessage, bool, error) {
 	// Get table name from cache (lazy loading)
 	tableName, err := b.getTableName(queueName, false)
 	if err == sql.ErrNoRows {
@@ -413,8 +469,8 @@ func (b *TiDBBackend) Peek(queueName string) (QueueMessage, bool, error) {
 
 	var data string
 	querySQL := fmt.Sprintf(
-		"SELECT data FROM %s WHERE deleted = 0 ORDER BY id LIMIT 1",
-		tableName,
+		"SELECT data FROM %s WHERE deleted = %s ORDER BY id LIMIT 1",
+		tableName, b.boolLiteral(false),
 	)
 	err = b.db.QueryRow(querySQL).Scan(&data)
 
@@ -433,7 +489,7 @@ func (b *TiDBBackend) Peek(queueName string) (QueueMessage, bool, error) {
 	return msg, true, nil
 }
 
-func (b *TiDBBackend) Size(queueName string) (int, error) {
+func (b *SQLQueueBackend) Size(queueName string) (int, error) {
 	// Get table name from cache (lazy loading)
 	tableName, err := b.getTableName(queueName, false)
 	if err == sql.ErrNoRows {
@@ -444,8 +500,8 @@ func (b *TiDBBackend) Size(queueName string) (int, error) {
 
 	var count int
 	querySQL := fmt.Sprintf(
-		"SELECT COUNT(*) FROM %s WHERE deleted = 0",
-		tableName,
+		"SELECT COUNT(*) FROM %s WHERE deleted = %s",
+		tableName, b.boolLiteral(false),
 	)
 	err = b.db.QueryRow(querySQL).Scan(&count)
 	if err != nil {
@@ -454,7 +510,7 @@ func (b *TiDBBackend) Size(queueName string) (int, error) {
 	return count, nil
 }
 
-func (b *TiDBBackend) Clear(queueName string) error {
+func (b *SQLQueueBackend) Clear(queueName string) error {
 	// Get table name from cache (lazy loading)
 	tableName, err := b.getTableName(queueName, false)
 	if err == sql.ErrNoRows {
@@ -472,7 +528,7 @@ func (b *TiDBBackend) Clear(queueName string) error {
 	return nil
 }
 
-func (b *TiDBBackend) ListQueues(prefix string) ([]string, error) {
+func (b *SQLQueueBackend) ListQueues(prefix string) ([]string, error) {
 	// Query from registry table to include all queues
 	var query string
 	var args []interface{}
@@ -483,6 +539,7 @@ func (b *TiDBBackend) ListQueues(prefix string) ([]string, error) {
 		query = "SELECT queue_name FROM queuefs_registry WHERE queue_name = ? OR queue_name LIKE ?"
 		args = []interface{}{prefix, prefix + "/%"}
 	}
+	query = b.rebind(query)
 
 	rows, err := b.db.Query(query, args...)
 	if err != nil {
@@ -502,7 +559,7 @@ func (b *TiDBBackend) ListQueues(prefix string) ([]string, error) {
 	return queues, nil
 }
 
-func (b *TiDBBackend) GetLastEnqueueTime(queueName string) (time.Time, error) {
+func (b *SQLQueueBackend) GetLastEnqueueTime(queueName string) (time.Time, error) {
 	// Get table name from cache (lazy loading)
 	tableName, err := b.getTableName(queueName, false)
 	if err == sql.ErrNoRows {
@@ -511,23 +568,27 @@ func (b *TiDBBackend) GetLastEnqueueTime(queueName string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("failed to get queue table name: %w", err)
 	}
 
-	var timestamp int64
+	var timestamp sql.NullInt64
 	querySQL := fmt.Sprintf(
-		"SELECT MAX(timestamp) FROM %s WHERE deleted = 0",
-		tableName,
+		"SELECT MAX(timestamp) FROM %s WHERE deleted = %s",
+		tableName, b.boolLiteral(false),
 	)
 	err = b.db.QueryRow(querySQL).Scan(&timestamp)
 
-	if err == sql.ErrNoRows || timestamp == 0 {
-		return time.Time{}, nil
-	} else if err != nil {
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return time.Time{}, nil
+		}
 		return time.Time{}, fmt.Errorf("failed to get last enqueue time: %w", err)
 	}
+	if !timestamp.Valid || timestamp.Int64 == 0 {
+		return time.Time{}, nil
+	}
 
-	return time.Unix(timestamp, 0), nil
+	return time.Unix(timestamp.Int64, 0), nil
 }
 
-func (b *TiDBBackend) RemoveQueue(queueName string) error {
+func (b *SQLQueueBackend) RemoveQueue(queueName string) error {
 	if queueName == "" {
 		// Remove all queues: drop all queue tables and clear registry
 		rows, err := b.db.Query("SELECT queue_name, table_name FROM queuefs_registry")
@@ -572,7 +633,7 @@ func (b *TiDBBackend) RemoveQueue(queueName string) error {
 
 	// Remove queue and nested queues
 	rows, err := b.db.Query(
-		"SELECT queue_name, table_name FROM queuefs_registry WHERE queue_name = ? OR queue_name LIKE ?",
+		b.rebind("SELECT queue_name, table_name FROM queuefs_registry WHERE queue_name = ? OR queue_name LIKE ?"),
 		queueName, queueName+"/%",
 	)
 	if err != nil {
@@ -610,27 +671,29 @@ func (b *TiDBBackend) RemoveQueue(queueName string) error {
 
 	// Remove from registry
 	_, err = b.db.Exec(
-		"DELETE FROM queuefs_registry WHERE queue_name = ? OR queue_name LIKE ?",
+		b.rebind("DELETE FROM queuefs_registry WHERE queue_name = ? OR queue_name LIKE ?"),
 		queueName, queueName+"/%",
 	)
 	return err
 }
 
-func (b *TiDBBackend) CreateQueue(queueName string) error {
+func (b *SQLQueueBackend) CreateQueue(queueName string) error {
 	// Generate table name
 	tableName := sanitizeTableName(queueName)
 
 	// Create the queue table
-	createTableSQL := getCreateTableSQL(tableName)
+	createTableSQL := b.backend.QueueTableDDL(tableName)
 	if _, err := b.db.Exec(createTableSQL); err != nil {
 		return fmt.Errorf("failed to create queue table: %w", err)
 	}
+	if err := b.backend.EnsureQueueIndexes(b.db, tableName); err != nil {
+		return err
+	}
 
 	// Register in queuefs_registry
-	_, err := b.db.Exec(
-		"INSERT IGNORE INTO queuefs_registry (queue_name, table_name) VALUES (?, ?)",
-		queueName, tableName,
-	)
+	registerSQL := b.backend.RegistryInsertSQL()
+	registerSQL = b.rebind(registerSQL)
+	_, err := b.db.Exec(registerSQL, queueName, tableName)
 	if err != nil {
 		return fmt.Errorf("failed to register queue: %w", err)
 	}
@@ -644,7 +707,7 @@ func (b *TiDBBackend) CreateQueue(queueName string) error {
 	return nil
 }
 
-func (b *TiDBBackend) QueueExists(queueName string) (bool, error) {
+func (b *SQLQueueBackend) QueueExists(queueName string) (bool, error) {
 	// Check cache first
 	b.cacheMu.RLock()
 	_, exists := b.tableCache[queueName]
@@ -657,7 +720,7 @@ func (b *TiDBBackend) QueueExists(queueName string) (bool, error) {
 	// If not in cache, query database
 	var count int
 	err := b.db.QueryRow(
-		"SELECT COUNT(*) FROM queuefs_registry WHERE queue_name = ?",
+		b.rebind("SELECT COUNT(*) FROM queuefs_registry WHERE queue_name = ?"),
 		queueName,
 	).Scan(&count)
 	if err != nil {

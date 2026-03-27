@@ -43,6 +43,7 @@ const (
 //   - memory (default): In-memory storage
 //   - tidb: TiDB database storage with TLS support
 //   - sqlite: SQLite database storage
+//   - pgsql: PostgreSQL database storage
 type QueueFSPlugin struct {
 	backend  QueueBackend
 	mu       sync.RWMutex // Protects backend operations
@@ -83,7 +84,7 @@ func (q *QueueFSPlugin) Validate(cfg map[string]interface{}) error {
 	allowedKeys := []string{
 		"backend", "mount_path",
 		// Database-related keys
-		"db_path", "dsn", "user", "password", "host", "port", "database",
+		"db_path", "dsn", "admin_dsn", "user", "password", "host", "port", "database",
 		"enable_tls", "tls_server_name", "tls_skip_verify",
 	}
 	if err := config.ValidateOnlyKnownKeys(cfg, allowedKeys); err != nil {
@@ -93,19 +94,22 @@ func (q *QueueFSPlugin) Validate(cfg map[string]interface{}) error {
 	// Validate backend type
 	backendType := config.GetStringConfig(cfg, "backend", "memory")
 	validBackends := map[string]bool{
-		"memory":  true,
-		"tidb":    true,
-		"mysql":   true,
-		"sqlite":  true,
-		"sqlite3": true,
+		"memory":     true,
+		"tidb":       true,
+		"mysql":      true,
+		"pgsql":      true,
+		"postgres":   true,
+		"postgresql": true,
+		"sqlite":     true,
+		"sqlite3":    true,
 	}
 	if !validBackends[backendType] {
-		return fmt.Errorf("unsupported backend: %s (valid options: memory, tidb, mysql, sqlite)", backendType)
+		return fmt.Errorf("unsupported backend: %s (valid options: memory, tidb, mysql, pgsql, sqlite)", backendType)
 	}
 
 	// Validate database-related parameters if backend is not memory
 	if backendType != "memory" {
-		for _, key := range []string{"db_path", "dsn", "user", "password", "host", "database", "tls_server_name"} {
+		for _, key := range []string{"db_path", "dsn", "admin_dsn", "user", "password", "host", "database", "tls_server_name"} {
 			if err := config.ValidateStringType(cfg, key); err != nil {
 				return err
 			}
@@ -137,8 +141,12 @@ func (q *QueueFSPlugin) Initialize(cfg map[string]interface{}) error {
 	switch backendType {
 	case "memory":
 		backend = NewMemoryBackend()
-	case "tidb", "mysql", "sqlite", "sqlite3":
-		backend = NewTiDBBackend()
+	case "sqlite", "sqlite3":
+		backend = NewSQLiteQueueBackend()
+	case "pgsql", "postgres", "postgresql":
+		backend = NewPostgresQueueBackend()
+	case "tidb", "mysql":
+		backend = NewTiDBQueueBackend()
 	default:
 		return fmt.Errorf("unsupported backend: %s", backendType)
 	}
@@ -205,44 +213,57 @@ NESTED QUEUES:
 BACKENDS:
 
   Memory Backend (default):
-  [plugins.queuefs]
-  enabled = true
-  path = "/queuefs"
-  # No additional config needed for memory backend
+    [plugins.queuefs]
+    enabled = true
+    path = "/queuefs"
+    # No additional config needed for memory backend
 
   SQLite Backend:
-  [plugins.queuefs]
-  enabled = true
-  path = "/queuefs"
+    [plugins.queuefs]
+    enabled = true
+    path = "/queuefs"
 
     [plugins.queuefs.config]
     backend = "sqlite"
     db_path = "queue.db"
 
+  PostgreSQL Backend (local):
+    [plugins.queuefs]
+    enabled = true
+    path = "/queuefs"
+
+    [plugins.queuefs.config]
+    backend = "pgsql"
+    host = "127.0.0.1"
+    port = 5432
+    user = "postgres"
+    password = ""
+    database = "queuedb"
+
   TiDB Backend (local):
-  [plugins.queuefs]
-  enabled = true
-  path = "/queuefs"
+    [plugins.queuefs]
+    enabled = true
+    path = "/queuefs"
 
     [plugins.queuefs.config]
     backend = "tidb"
     host = "127.0.0.1"
-    port = "4000"
+    port = 4000
     user = "root"
     password = ""
     database = "queuedb"
 
   TiDB Cloud Backend (with TLS):
-  [plugins.queuefs]
-  enabled = true
-  path = "/queuefs"
+    [plugins.queuefs]
+    enabled = true
+    path = "/queuefs"
 
     [plugins.queuefs.config]
     backend = "tidb"
     user = "3YdGXuXNdAEmP1f.root"
     password = "your_password"
     host = "gateway01.us-west-2.prod.aws.tidbcloud.com"
-    port = "4000"
+    port = 4000
     database = "queuedb"
     enable_tls = true
     tls_server_name = "gateway01.us-west-2.prod.aws.tidbcloud.com"
@@ -276,6 +297,7 @@ EXAMPLES:
 BACKEND COMPARISON:
   - memory: Fastest, no persistence, lost on restart
   - sqlite: Good for single server, persistent, file-based
+  - pgsql: Good for local and server deployments, persistent, transactional
   - tidb: Best for production, distributed, scalable, persistent
 `
 }
@@ -287,7 +309,7 @@ func (q *QueueFSPlugin) GetConfigParams() []plugin.ConfigParameter {
 			Type:        "string",
 			Required:    false,
 			Default:     "memory",
-			Description: "Queue backend (memory, tidb, mysql, sqlite, sqlite3)",
+			Description: "Queue backend (memory, tidb, mysql, pgsql, postgres, sqlite, sqlite3)",
 		},
 		{
 			Name:        "db_path",
@@ -302,6 +324,13 @@ func (q *QueueFSPlugin) GetConfigParams() []plugin.ConfigParameter {
 			Required:    false,
 			Default:     "",
 			Description: "Database connection string (DSN)",
+		},
+		{
+			Name:        "admin_dsn",
+			Type:        "string",
+			Required:    false,
+			Default:     "",
+			Description: "Administrative DSN used to create the target database when it does not exist",
 		},
 		{
 			Name:        "user",
@@ -1028,9 +1057,9 @@ type queueFileHandle struct {
 
 // handleManager manages open handles for queueFS
 type handleManager struct {
-	handles  map[int64]*queueFileHandle
-	nextID   int64
-	mu       sync.Mutex
+	handles map[int64]*queueFileHandle
+	nextID  int64
+	mu      sync.Mutex
 }
 
 // Global handle manager for queueFS (per plugin instance would be better, but keeping it simple)
