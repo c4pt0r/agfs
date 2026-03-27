@@ -254,12 +254,14 @@ func NewPostgresQueueBackend() *SQLQueueBackend {
 func (b *SQLQueueBackend) Initialize(config map[string]interface{}) error {
 	backendType := b.backendType
 	if backendType == "" {
-		backendType = "memory"
 		if val, ok := config["backend"]; ok {
 			if strVal, ok := val.(string); ok {
 				backendType = strVal
 			}
 		}
+	}
+	if backendType == "" || backendType == "memory" {
+		return fmt.Errorf("SQLQueueBackend requires a SQL backend (sqlite, tidb/mysql, pgsql/postgres); use MemoryBackend for in-memory mode")
 	}
 	b.backendType = backendType
 
