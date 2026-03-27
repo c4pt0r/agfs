@@ -227,36 +227,38 @@ type SQLQueueBackend struct {
 	cacheMu     sync.RWMutex      // protects tableCache
 }
 
-func newSQLQueueBackend(backend DBBackend) *SQLQueueBackend {
+func newSQLQueueBackend(backendType string, backend DBBackend) *SQLQueueBackend {
 	return &SQLQueueBackend{
-		backend:    backend,
-		tableCache: make(map[string]string),
+		backendType: backendType,
+		backend:     backend,
+		tableCache:  make(map[string]string),
 	}
 }
 
 func NewSQLQueueBackend() *SQLQueueBackend {
-	return newSQLQueueBackend(nil)
-
+	return newSQLQueueBackend("", nil)
 }
 
 func NewSQLiteQueueBackend() *SQLQueueBackend {
-	return newSQLQueueBackend(NewSQLiteDBBackend())
+	return newSQLQueueBackend("sqlite", NewSQLiteDBBackend())
 }
 
 func NewTiDBQueueBackend() *SQLQueueBackend {
-	return newSQLQueueBackend(NewTiDBDBBackend())
+	return newSQLQueueBackend("tidb", NewTiDBDBBackend())
 }
 
 func NewPostgresQueueBackend() *SQLQueueBackend {
-	return newSQLQueueBackend(NewPostgreSQLDBBackend())
+	return newSQLQueueBackend("pgsql", NewPostgreSQLDBBackend())
 }
 
 func (b *SQLQueueBackend) Initialize(config map[string]interface{}) error {
-	// Store backend type from config
-	backendType := "memory" // default
-	if val, ok := config["backend"]; ok {
-		if strVal, ok := val.(string); ok {
-			backendType = strVal
+	backendType := b.backendType
+	if backendType == "" {
+		backendType = "memory"
+		if val, ok := config["backend"]; ok {
+			if strVal, ok := val.(string); ok {
+				backendType = strVal
+			}
 		}
 	}
 	b.backendType = backendType
