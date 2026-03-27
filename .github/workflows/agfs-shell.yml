@@ -1,36 +1,30 @@
-name: CI
+name: agfs-shell
 
 on:
   push:
     branches: [master, main, develop]
     paths:
-      - ".github/workflows/ci.yml"
-      - "agfs-server/**"
-      - "agfs-fuse/**"
-      - "agfs-sdk/go/**"
-      - "agfs-sdk/python/**"
+      - ".github/workflows/agfs-shell.yml"
       - "agfs-shell/**"
+      - "agfs-sdk/python/**"
   pull_request:
     branches: [master, main, develop]
     paths:
-      - ".github/workflows/ci.yml"
-      - "agfs-server/**"
-      - "agfs-fuse/**"
-      - "agfs-sdk/go/**"
-      - "agfs-sdk/python/**"
+      - ".github/workflows/agfs-shell.yml"
       - "agfs-shell/**"
+      - "agfs-sdk/python/**"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: agfs-shell-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  agfs-shell-lint:
-    name: agfs-shell lint
+  lint:
+    name: lint
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -65,13 +59,13 @@ jobs:
         run: uv run mypy agfs_shell/ --ignore-missing-imports
         continue-on-error: true
 
-  agfs-shell-tests:
-    name: agfs-shell tests (Python ${{ matrix.python-version }})
+  tests:
+    name: tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        python-version: ["3.11", "3.12"]
     defaults:
       run:
         working-directory: agfs-shell
@@ -101,57 +95,3 @@ jobs:
         with:
           name: agfs-shell-coverage
           path: agfs-shell/coverage.xml
-
-  go-tests:
-    name: ${{ matrix.name }} tests
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: agfs-sdk/go
-            path: agfs-sdk/go
-            go-version-file: agfs-sdk/go/go.mod
-          - name: agfs-fuse
-            path: agfs-fuse
-            go-version-file: agfs-fuse/go.mod
-          - name: agfs-server
-            path: agfs-server
-            go-version-file: agfs-server/go.mod
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: ${{ matrix.go-version-file }}
-
-      - name: Run Go tests
-        working-directory: ${{ matrix.path }}
-        run: go test -v ./...
-
-  agfs-server-failpoint-tests:
-    name: agfs-server failpoint tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: agfs-server/go.mod
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install failpoint-ctl
-        working-directory: agfs-server
-        run: go install github.com/pingcap/failpoint/failpoint-ctl@latest
-
-      - name: Run failpoint tests
-        working-directory: agfs-server
-        run: python3 scripts/run_failpoint_tests.py
