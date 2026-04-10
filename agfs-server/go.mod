@@ -13,6 +13,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/go-immutable-radix v1.3.1
 	github.com/mattn/go-sqlite3 v1.14.32
+	github.com/pingcap/failpoint v0.0.0-20251231045439-91d91e123837
 	github.com/sirupsen/logrus v1.9.3
 	github.com/tetratelabs/wazero v1.9.0
 	github.com/zeebo/xxh3 v1.0.2
@@ -37,6 +38,7 @@ require (
 	github.com/aws/smithy-go v1.23.0 // indirect
 	github.com/hashicorp/golang-lru v0.5.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
+	github.com/pingcap/errors v0.11.4 // indirect
 	golang.org/x/sys v0.0.0-20220715151400-c0bba94af5f8 // indirect
 )
 

@@ -262,8 +262,24 @@ All API endpoints are prefixed with `/api/v1/`.
 ### Commands
 -   `make build`: Build the server binary.
 -   `make test`: Run tests.
+-   `make test-failpoint`: Run failpoint tests.
 -   `make dev`: Run the server in development mode.
 -   `make install`: Install the binary to `$GOPATH/bin`.
+
+### Running Failpoint Tests
+
+Tests defined in files ending with `*_failpoint_test.go` rely on [`pingcap/failpoint`](https://github.com/pingcap/failpoint).
+Run them through the failpoint instrumentation flow instead of plain `go test`.
+
+```bash
+make test-failpoint
+```
+
+This target:
+
+- rewrites the agfs-server source tree with `failpoint-ctl enable`
+- runs `go test -tags failpoint ./...`
+- restores the source tree with `failpoint-ctl disable` on exit
 
 ## License
 

@@ -1,4 +1,4 @@
-.PHONY: all build run test clean install help lint deps
+.PHONY: all build run test clean install help lint deps test-failpoint
 
 # Variables
 BINARY_NAME=agfs-server
@@ -40,6 +40,10 @@ install: build ## Install the binary to $GOPATH/bin
 test: ## Run all tests
 	@echo "Running tests..."
 	$(GO) test -v ./...
+
+test-failpoint: ## Run agfs-server failpoint tests
+	@echo "Running failpoint tests..."
+	./scripts/run_failpoint_tests.py
 
 lint: ## Run golangci-lint (requires golangci-lint to be installed)
 	@echo "Running golangci-lint..."
