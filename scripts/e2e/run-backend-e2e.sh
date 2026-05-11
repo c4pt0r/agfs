@@ -189,7 +189,7 @@ http_code() {
 }
 
 write_healthy_config() {
-  cat >"$TMP_DIR/healthy.yaml" <<'YAML'
+  cat >"$TMP_DIR/healthy.yaml" <<YAML
 server:
   address: ":18082"
   log_level: warn
@@ -201,9 +201,16 @@ plugins:
     path: /memfs
     config: {}
   queuefs:
-    enabled: true
-    path: /queuefs
-    config: {}
+    - name: memory
+      enabled: true
+      path: /queuefs
+      config: {}
+    - name: sqlite
+      enabled: true
+      path: /queuefs-sqlite
+      config:
+        backend: sqlite
+        db_path: $TMP_DIR/queuefs-sqlite-e2e.db
   serverinfofs:
     enabled: true
     path: /serverinfo
@@ -250,6 +257,7 @@ healthy_server_e2e() {
   assert_mount_status "$mounts" "/dev" "mounted"
   assert_mount_status "$mounts" "/memfs" "mounted"
   assert_mount_status "$mounts" "/queuefs" "mounted"
+  assert_mount_status "$mounts" "/queuefs-sqlite" "mounted"
   assert_mount_status "$mounts" "/serverinfo" "mounted"
   assert_mount_status "$mounts" "/hello" "mounted"
 
@@ -283,6 +291,39 @@ healthy_server_e2e() {
   curl -fsS -X PUT --data-binary "queued-message" "$BASE_URL/api/v1/files?path=$queue/enqueue" >/dev/null
   response=$(curl -fsS "$BASE_URL/api/v1/files?path=$queue/dequeue")
   assert_contains "$response" "queued-message"
+
+  echo "[backend-e2e] SQLite QueueFS concurrent dequeue smoke"
+  local sqlite_queue="/queuefs-sqlite/e2e-$(date +%s%N)"
+  curl -fsS -X POST "$BASE_URL/api/v1/directories?path=$sqlite_queue" >/dev/null
+  for i in $(seq 0 7); do
+    curl -fsS -X PUT --data-binary "sqlite-message-$i" "$BASE_URL/api/v1/files?path=$sqlite_queue/enqueue" >/dev/null
+  done
+  BASE_URL="$BASE_URL" QUEUE_PATH="$sqlite_queue" python3 - <<'PY'
+import concurrent.futures
+import json
+import os
+import urllib.parse
+import urllib.request
+
+base = os.environ["BASE_URL"]
+queue = os.environ["QUEUE_PATH"]
+
+def dequeue(_):
+    query = urllib.parse.urlencode({"path": f"{queue}/dequeue"})
+    with urllib.request.urlopen(f"{base}/api/v1/files?{query}", timeout=10) as response:
+        return response.read().decode()
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+    bodies = list(pool.map(dequeue, range(8)))
+
+messages = [json.loads(body) for body in bodies]
+data = [msg.get("data") for msg in messages]
+expected = {f"sqlite-message-{i}" for i in range(8)}
+if set(data) != expected or len(data) != len(set(data)):
+    raise SystemExit(f"unexpected SQLite QueueFS dequeue results: {data}")
+PY
+  response=$(curl -fsS "$BASE_URL/api/v1/files?path=$sqlite_queue/dequeue")
+  [[ "$response" == "{}" ]] || fail "SQLite QueueFS should be empty after concurrent dequeue, got '$response'"
 
   stop_server
 }

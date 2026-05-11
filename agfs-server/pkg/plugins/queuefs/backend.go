@@ -420,6 +420,22 @@ func (b *TiDBBackend) Dequeue(queueName string) (QueueMessage, bool, error) {
 		return QueueMessage{}, false, fmt.Errorf("failed to get queue table name: %w", err)
 	}
 
+	if querySQL, ok := b.backend.GetAtomicDequeueQuery(tableName); ok {
+		var data string
+		err = b.db.QueryRow(querySQL).Scan(&data)
+		if err == sql.ErrNoRows {
+			return QueueMessage{}, false, nil
+		} else if err != nil {
+			return QueueMessage{}, false, fmt.Errorf("failed to atomically dequeue message: %w", err)
+		}
+
+		var msg QueueMessage
+		if err := json.Unmarshal([]byte(data), &msg); err != nil {
+			return QueueMessage{}, false, fmt.Errorf("failed to unmarshal message: %w", err)
+		}
+		return msg, true, nil
+	}
+
 	// Start transaction
 	tx, err := b.db.Begin()
 	if err != nil {
