@@ -3,6 +3,9 @@ LS command - list directory contents.
 """
 
 import os
+
+from pyagfs.exceptions import AGFSClientError
+
 from ..process import Process
 from ..command_decorators import command
 from ..utils.formatters import mode_to_rwx, human_readable_size
@@ -55,13 +58,18 @@ def cmd_ls(process: Process) -> int:
         meta = file_info.get('meta', {})
         is_symlink = meta.get('Type') == 'symlink'
 
-        # Get symlink target if this is a symlink
+        # Get symlink target if this is a symlink. ``readlink`` raises
+        # ``AGFSClientError`` for the documented "not a symlink /
+        # missing / unreadable" cases — those are the only failure
+        # modes where falling back to a plain-file display is correct.
+        # Any other exception type (programmer error, transport bug)
+        # bubbles up so the user actually hears about it.
         symlink_target = None
         if is_symlink and full_path:
             try:
                 symlink_target = process.context.filesystem.readlink(full_path)
-            except Exception:
-                # If readlink fails, just show as regular file
+            except AGFSClientError:
+                # readlink failed — fall back to plain-file display.
                 pass
 
         if long_format:

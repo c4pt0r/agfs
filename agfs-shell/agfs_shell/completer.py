@@ -3,6 +3,9 @@
 import os
 import shlex
 from typing import List, Optional
+
+from pyagfs.exceptions import AGFSClientError
+
 from .builtins import BUILTINS
 from .filesystem import AGFSFileSystem
 
@@ -165,6 +168,11 @@ class ShellCompleter:
                     matches.append(final_path)
 
             return sorted(matches)
-        except Exception:
-            # If directory listing fails, return no matches
+        except AGFSClientError:
+            # Directory listing failed at the filesystem boundary —
+            # legitimately silence and return no completions, since
+            # tab-completion must never crash the REPL on transient
+            # network/permission errors. Programmer errors and other
+            # exception types are NOT silenced; they propagate to
+            # readline's handler so bugs surface in development.
             return []

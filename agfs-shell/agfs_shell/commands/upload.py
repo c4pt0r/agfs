@@ -4,6 +4,8 @@ UPLOAD command - (auto-migrated from builtins.py)
 
 import os
 
+from pyagfs.exceptions import AGFSClientError
+
 from ..process import Process
 from ..command_decorators import command
 from . import register_command
@@ -43,7 +45,13 @@ def cmd_upload(process: Process) -> int:
             process.stderr.write(f"upload: {local_path}: No such file or directory\n")
             return 1
 
-        # Check if destination is a directory
+        # Check if destination is a directory. The "destination doesn't
+        # exist yet" case is signalled by ``AGFSClientError`` (the
+        # documented contract of ``filesystem.get_file_info``), so we
+        # only swallow that. Any other exception type — programmer
+        # error, attribute error, etc. — bubbles out to the outer
+        # handler instead of silently steering the upload to the wrong
+        # path.
         try:
             dest_info = process.context.filesystem.get_file_info(agfs_path)
             if dest_info.get('isDir', False):
@@ -51,8 +59,8 @@ def cmd_upload(process: Process) -> int:
                 source_basename = os.path.basename(local_path)
                 agfs_path = os.path.join(agfs_path, source_basename)
                 agfs_path = os.path.normpath(agfs_path)
-        except Exception:
-            # Destination doesn't exist, use as-is
+        except AGFSClientError:
+            # Destination doesn't exist (or is unreadable) — use as-is.
             pass
 
         if os.path.isfile(local_path):
@@ -69,6 +77,9 @@ def cmd_upload(process: Process) -> int:
             return 1
 
     except Exception as e:
+        # Outer boundary: surface any unexpected error to the user but
+        # don't let it crash the shell. Keep this catch broad — it is
+        # the documented command-level fallback.
         error_msg = str(e)
         process.stderr.write(f"upload: {error_msg}\n")
         return 1
@@ -95,18 +106,20 @@ def _upload_dir(process: Process, local_path: str, agfs_path: str) -> int:
     """Helper: Upload a directory recursively to AGFS"""
 
     try:
-        # Create target directory in AGFS if it doesn't exist
+        # Create target directory in AGFS if it doesn't exist. Only
+        # ``AGFSClientError`` is allowed to mean "missing" here — any
+        # other exception type is an unexpected bug and must bubble.
         try:
             info = process.context.filesystem.get_file_info(agfs_path)
             if not info.get('isDir', False):
                 process.stderr.write(f"upload: {agfs_path}: Not a directory\n")
                 return 1
-        except Exception:
-            # Directory doesn't exist, create it
+        except AGFSClientError:
+            # Directory doesn't exist, create it.
             try:
                 # Use mkdir command to create directory
                 process.context.filesystem.client.mkdir(agfs_path)
-            except Exception as e:
+            except AGFSClientError as e:
                 process.stderr.write(f"upload: cannot create directory {agfs_path}: {str(e)}\n")
                 return 1
 
@@ -120,14 +133,20 @@ def _upload_dir(process: Process, local_path: str, agfs_path: str) -> int:
                 current_agfs_dir = os.path.join(agfs_path, rel_path)
                 current_agfs_dir = os.path.normpath(current_agfs_dir)
 
-            # Create subdirectories in AGFS
+            # Create subdirectories in AGFS. We only ignore the
+            # specific "directory already exists" failure mode — which
+            # surfaces as an ``AGFSClientError``. Programmer errors
+            # (AttributeError, TypeError, ...) must not be silenced
+            # because they would let the upload proceed against a
+            # broken filesystem object.
             for dirname in dirs:
                 dir_agfs_path = os.path.join(current_agfs_dir, dirname)
                 dir_agfs_path = os.path.normpath(dir_agfs_path)
                 try:
                     process.context.filesystem.client.mkdir(dir_agfs_path)
-                except Exception:
-                    # Directory might already exist, ignore
+                except AGFSClientError:
+                    # mkdir on an existing directory raises here on the
+                    # server side; treat it as success for idempotency.
                     pass
 
             # Upload files
@@ -143,5 +162,7 @@ def _upload_dir(process: Process, local_path: str, agfs_path: str) -> int:
         return 0
 
     except Exception as e:
+        # Outer boundary — see comment in cmd_upload above. Keep broad
+        # so the shell never crashes on a single command's failure.
         process.stderr.write(f"upload: {str(e)}\n")
         return 1
