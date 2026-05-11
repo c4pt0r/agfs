@@ -106,6 +106,23 @@ class Stream:
             return data
         return b''
 
+    def __iter__(self):
+        """
+        Iterate over lines in the stream.
+
+        Mirrors the POSIX `for line in <file>` pattern so commands and tests
+        can do ``for line in process.stdin: ...``. Yields whichever line
+        type the underlying file object yields (bytes for binary streams).
+        This is a thin wrapper around ``readline()``; it does not buffer
+        the entire stream up front. ``list(stream)`` still materialises
+        all lines because list() exhausts the generator.
+        """
+        while True:
+            line = self.readline()
+            if not line:
+                return
+            yield line
+
 
 class InputStream(Stream):
     """

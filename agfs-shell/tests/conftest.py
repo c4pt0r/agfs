@@ -351,27 +351,30 @@ def test_data_dir(tmp_path):
 @pytest.fixture
 def capture_output():
     """
-    Provides StringIO objects for capturing command output.
+    Provides buffer-backed OutputStream/ErrorStream for capturing command output.
+
+    The streams are constructed via ``.to_buffer()`` so that
+    ``stream.get_value()`` and ``process.get_stdout()`` /
+    ``process.get_stderr()`` return what was written. Constructing
+    ``OutputStream(io.BytesIO())`` directly routes writes to
+    ``Stream._file`` instead of ``Stream._buffer``, which makes
+    ``get_value()`` always return ``b''`` — the symptom that used to make
+    ``test_write_to_stdout`` / ``test_write_to_stderr`` fail.
 
     Returns:
-        tuple: (stdout, stderr) StringIO objects
+        tuple: (stdout, stderr) — both ``Stream`` instances whose contents
+        can be read back with ``.get_value()``.
 
     Example:
         def test_command_output(capture_output):
             stdout, stderr = capture_output
             process = Process(stdout=stdout, stderr=stderr)
             # ... run command ...
-            assert stdout.getvalue() == "expected output"
+            assert b"expected output" in stdout.get_value()
     """
     from agfs_shell.streams import OutputStream, ErrorStream
 
-    stdout_buffer = io.BytesIO()
-    stderr_buffer = io.BytesIO()
-
-    stdout = OutputStream(stdout_buffer)
-    stderr = ErrorStream(stderr_buffer)
-
-    return stdout, stderr
+    return OutputStream.to_buffer(), ErrorStream.to_buffer()
 
 
 @pytest.fixture

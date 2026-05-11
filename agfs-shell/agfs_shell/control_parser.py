@@ -367,6 +367,33 @@ class ControlParser:
             else_body=else_body
         )
 
+    @staticmethod
+    def _parse_function_params(params_str: Optional[str]) -> List[str]:
+        """Parse a comma-separated parameter list from a function header.
+
+        ``None`` / empty / whitespace-only -> ``[]``. Whitespace around each
+        name is stripped. Declared names are stored for introspection only;
+        call-time binding still uses ``$1``, ``$2``, ... .
+        """
+        if not params_str or not params_str.strip():
+            return []
+        return [p.strip() for p in params_str.split(',') if p.strip()]
+
+    # Regex fragments for the supported function-definition headers:
+    #   name() { ... }
+    #   name(a, b) { ... }
+    #   function name { ... }
+    #   function name() { ... }
+    #   function name(a, b) { ... }
+    # The bash form makes the parameter list optional; the POSIX form
+    # requires the parens (with or without typed params).
+    _FUNCTION_HEADER_POSIX = (
+        r'^([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)'
+    )
+    _FUNCTION_HEADER_BASH = (
+        r'^function\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(([^)]*)\))?'
+    )
+
     def parse_function_definition(self, lines: List[str]) -> Optional[FunctionDefinition]:
         """Parse a function definition from lines"""
         if not lines:
@@ -374,29 +401,32 @@ class ControlParser:
 
         first_line = lines[0].strip()
 
-        # Try single-line function: name() { cmd; }
-        match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{(.+)\}$', first_line)
+        # Try single-line function: name() { cmd; } / function name() { cmd; }
+        match = re.match(self._FUNCTION_HEADER_POSIX + r'\s*\{(.+)\}$', first_line)
         if not match:
-            match = re.match(r'^function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{(.+)\}$', first_line)
+            match = re.match(self._FUNCTION_HEADER_BASH + r'\s*\{(.+)\}$', first_line)
 
         if match:
             name = match.group(1)
-            body_str = match.group(2).strip()
+            params = self._parse_function_params(match.group(2))
+            body_str = match.group(3).strip()
             commands = [cmd.strip() for cmd in body_str.split(';') if cmd.strip()]
             return FunctionDefinition(
                 name=name,
+                params=params,
                 body=self._parse_block(commands)
             )
 
-        # Multi-line function: name() { \n ... \n }
-        match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{?\s*$', first_line)
+        # Multi-line function header: name() / function name [()] [{]
+        match = re.match(self._FUNCTION_HEADER_POSIX + r'\s*\{?\s*$', first_line)
         if not match:
-            match = re.match(r'^function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{?\s*$', first_line)
+            match = re.match(self._FUNCTION_HEADER_BASH + r'\s*\{?\s*$', first_line)
 
         if not match:
             return None
 
         name = match.group(1)
+        params = self._parse_function_params(match.group(2))
         commands = []
 
         # Collect body
@@ -419,6 +449,7 @@ class ControlParser:
 
         return FunctionDefinition(
             name=name,
+            params=params,
             body=self._parse_block(commands)
         )
 
