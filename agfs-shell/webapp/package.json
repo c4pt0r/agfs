@@ -2,6 +2,11 @@
   "name": "agfs-shell-webapp",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0",
+    "npm": ">=10"
+  },
   "dependencies": {
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
@@ -11,8 +16,11 @@
     "react-split": "^2.0.14"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "^4.2.1",
-    "vite": "^5.0.0"
+    "@vitejs/plugin-react": "^6.0.1",
+    "vite": "^8.0.12"
+  },
+  "overrides": {
+    "dompurify": "3.4.2"
   },
   "scripts": {
     "dev": "vite",
