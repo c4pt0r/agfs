@@ -108,66 +108,130 @@ class StreamingPipeline:
 
 
 class StreamingInputStream(InputStream):
-    """Input stream that reads from a queue in chunks"""
+    """Input stream that reads from a queue in chunks.
+
+    Reads pull whole chunks off a ``queue.Queue`` (sentinel ``None`` =
+    EOF) and serve them out of a rolling ``bytearray`` buffer. The
+    buffer is compacted in place when the consumed prefix grows large,
+    so memory stays O(largest unread chunk) instead of growing with
+    total stream size.
+
+    Performance contract:
+
+    * ``read(size)`` is O(consumed bytes) — copies the requested slice
+      out of the buffer in one go rather than fan-in-via-many-Reads.
+    * ``readline()`` is O(line length) — uses ``bytearray.find(b'\\n', start)``
+      to scan the buffer in C, refilling from the queue when no newline
+      is present. The previous implementation called ``read(1)`` per
+      byte, which made each line cost O(N) Python-level iterations
+      *and* O(N) ``io.BytesIO`` re-instantiations.
+
+    Both methods share buffer state so a partial read followed by a
+    readline reuses already-buffered bytes.
+    """
+
+    # When the consumed prefix grows beyond this many bytes, drop it
+    # so the buffer's memory stays bounded for long streams. Below
+    # this threshold we keep the prefix because the slicing cost
+    # outweighs the wasted memory.
+    _COMPACT_THRESHOLD = 4096
 
     def __init__(self, pipe: queue.Queue):
         super().__init__(None)
         self.pipe = pipe
-        self._buffer = io.BytesIO()
+        self._buf = bytearray()  # rolling buffer of pulled-but-unread bytes
+        self._pos = 0            # how many bytes of self._buf the caller has consumed
         self._eof = False
 
+    def _available(self) -> int:
+        """Unread bytes currently in the rolling buffer."""
+        return len(self._buf) - self._pos
+
+    def _compact_if_needed(self) -> None:
+        """Drop the consumed prefix of the buffer once it gets large.
+
+        Without this, ``self._buf`` grows monotonically with total
+        stream size even though we only ever read forward. Dropping
+        in place via ``del self._buf[:self._pos]`` reuses the existing
+        allocation.
+        """
+        if self._pos > self._COMPACT_THRESHOLD:
+            del self._buf[:self._pos]
+            self._pos = 0
+
+    def _pull_chunk(self) -> bool:
+        """Pull one chunk off the queue into the rolling buffer.
+
+        Returns True if new bytes arrived, False on EOF. The chunk is
+        appended; the caller is responsible for tracking how far it's
+        consumed via ``self._pos``.
+        """
+        if self._eof:
+            return False
+        chunk = self.pipe.get()
+        if chunk is None:  # EOF sentinel
+            self._eof = True
+            return False
+        self._compact_if_needed()
+        self._buf.extend(chunk)
+        return True
+
     def read(self, size: int = -1) -> bytes:
-        """Read from the queue-based pipe"""
-        if size == -1:
-            # Read all available data
-            chunks = []
-            while not self._eof:
-                chunk = self.pipe.get()
-                if chunk is None:  # EOF
-                    self._eof = True
-                    break
-                chunks.append(chunk)
-            return b''.join(chunks)
-        else:
-            # Read specific number of bytes
-            data = b''
-            while len(data) < size and not self._eof:
-                # Check if we have buffered data
-                buffered = self._buffer.read(size - len(data))
-                if buffered:
-                    data += buffered
-                    if len(data) >= size:
-                        break
-
-                # Get more data from queue
-                chunk = self.pipe.get()
-                if chunk is None:  # EOF
-                    self._eof = True
-                    break
-
-                # Put in buffer
-                self._buffer = io.BytesIO(chunk)
-
+        """Read up to ``size`` bytes, or everything until EOF if ``size < 0``."""
+        if size < 0:
+            # Drain the pipe to EOF and return everything buffered + pulled.
+            while self._pull_chunk():
+                pass
+            data = bytes(self._buf[self._pos:])
+            # Reset state so future reads after EOF return b''.
+            self._buf.clear()
+            self._pos = 0
             return data
 
+        if size == 0:
+            return b""
+
+        # Refill until we have ``size`` bytes available or hit EOF.
+        while self._available() < size:
+            if not self._pull_chunk():
+                break
+
+        end = min(self._pos + size, len(self._buf))
+        data = bytes(self._buf[self._pos:end])
+        self._pos = end
+        return data
+
     def readline(self) -> bytes:
-        """Read a line from the pipe"""
-        line = []
-        while not self._eof:
-            byte = self.read(1)
-            if not byte:
-                break
-            line.append(byte)
-            if byte == b'\n':
-                break
-        return b''.join(line)
+        """Read up to and including the next newline, or to EOF.
+
+        Uses ``bytearray.find`` (implemented in C) instead of the old
+        ``read(1)``-per-byte loop. Big-O on long lines drops from
+        quadratic to linear, and the constant factor drops by an order
+        of magnitude.
+        """
+        while True:
+            newline_idx = self._buf.find(b"\n", self._pos)
+            if newline_idx != -1:
+                end = newline_idx + 1
+                data = bytes(self._buf[self._pos:end])
+                self._pos = end
+                return data
+            if not self._pull_chunk():
+                # EOF — return whatever's left (may be b'' if we hit a
+                # clean stream end without a trailing newline).
+                data = bytes(self._buf[self._pos:])
+                self._buf.clear()
+                self._pos = 0
+                return data
 
     def readlines(self) -> list:
-        """Read all lines from the pipe"""
+        """Read all lines until EOF as a list."""
         lines = []
-        while not self._eof:
+        while True:
             line = self.readline()
             if not line:
+                # readline returns b'' only when there's nothing
+                # buffered AND the pipe is at EOF.
                 break
             lines.append(line)
         return lines
