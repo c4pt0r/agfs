@@ -316,5 +316,209 @@ class TestLexerIntegration:
         assert len(redirect_tokens) >= 1
 
 
+# =============================================================================
+# Regression: lexer infinite-loop on `2>&1` and related operators (dev-2, 2026-05)
+# =============================================================================
+#
+# Before the fix, ShellLexer.tokenize() hung forever on inputs containing
+# bare `&` or `;` (notably `2>&1`): the existing redirection branch consumed
+# `2>` correctly, then `&` fell through to read_word() which terminates on `&`
+# without consuming it, leaving pos unchanged so the outer while-loop spun
+# indefinitely. These tests exercise the new operator handling and a safety
+# net that guarantees forward progress on any unhandled character.
+#
+# All regression tests carry an explicit pytest timeout so a future
+# re-introduction of the hang fails fast instead of stalling CI.
+
+
+def _values(tokens, type_filter=None):
+    """Helper: project tokens to (type, value) tuples, dropping EOF."""
+    if type_filter is None:
+        return [(t.type, t.value) for t in tokens if t.type != TokenType.EOF]
+    return [t.value for t in tokens if t.type == type_filter]
+
+
+class TestLexerHangRegression:
+    """Inputs that used to spin the lexer forever — now must complete promptly."""
+
+    @pytest.mark.timeout(2)
+    def test_2_stderr_to_stdout_does_not_hang(self):
+        toks = ShellLexer("echo hi 2>&1").tokenize()
+        assert _values(toks) == [
+            (TokenType.WORD, "echo"),
+            (TokenType.WORD, "hi"),
+            (TokenType.REDIRECT, "2>&1"),
+        ]
+
+    @pytest.mark.timeout(2)
+    def test_existing_integration_input_does_not_hang(self):
+        # Same input used by TestLexerIntegration.test_command_with_redirects.
+        # Pre-fix, this string caused tokenize() to hang.
+        toks = ShellLexer("command < input.txt > output.txt 2>&1").tokenize()
+        redirects = _values(toks, TokenType.REDIRECT)
+        assert redirects == ["<", ">", "2>&1"]
+
+    @pytest.mark.timeout(2)
+    def test_background_amp_does_not_hang(self):
+        toks = ShellLexer("sleep 5 &").tokenize()
+        assert _values(toks) == [
+            (TokenType.WORD, "sleep"),
+            (TokenType.WORD, "5"),
+            (TokenType.BACKGROUND, "&"),
+        ]
+
+    @pytest.mark.timeout(2)
+    def test_semicolon_separator_does_not_hang(self):
+        toks = ShellLexer("cmd1; cmd2").tokenize()
+        assert _values(toks) == [
+            (TokenType.WORD, "cmd1"),
+            (TokenType.SEMICOLON, ";"),
+            (TokenType.WORD, "cmd2"),
+        ]
+
+    @pytest.mark.timeout(2)
+    def test_pipeline_with_2_stderr_to_stdout(self):
+        toks = ShellLexer("echo a | wc -l 2>&1").tokenize()
+        assert _values(toks) == [
+            (TokenType.WORD, "echo"),
+            (TokenType.WORD, "a"),
+            (TokenType.PIPE, "|"),
+            (TokenType.WORD, "wc"),
+            (TokenType.WORD, "-l"),
+            (TokenType.REDIRECT, "2>&1"),
+        ]
+
+
+class TestFdDuplicationRedirections:
+    """N>&M, N>&-, <&N, &> and &>> should each tokenize as a single REDIRECT."""
+
+    def test_2_to_1_duplication(self):
+        toks = ShellLexer("cmd 2>&1").tokenize()
+        assert _values(toks, TokenType.REDIRECT) == ["2>&1"]
+
+    def test_1_to_2_duplication(self):
+        toks = ShellLexer("cmd 1>&2").tokenize()
+        assert _values(toks, TokenType.REDIRECT) == ["1>&2"]
+
+    def test_close_fd_with_dash(self):
+        toks = ShellLexer("cmd 2>&-").tokenize()
+        assert _values(toks, TokenType.REDIRECT) == ["2>&-"]
+
+    def test_dup_input_fd(self):
+        toks = ShellLexer("cmd <&0").tokenize()
+        assert _values(toks, TokenType.REDIRECT) == ["<&0"]
+
+    def test_amp_redirect_both_streams(self):
+        toks = ShellLexer("cmd &> out.log").tokenize()
+        assert _values(toks) == [
+            (TokenType.WORD, "cmd"),
+            (TokenType.REDIRECT, "&>"),
+            (TokenType.WORD, "out.log"),
+        ]
+
+    def test_amp_append_both_streams(self):
+        toks = ShellLexer("cmd &>> out.log").tokenize()
+        assert _values(toks) == [
+            (TokenType.WORD, "cmd"),
+            (TokenType.REDIRECT, "&>>"),
+            (TokenType.WORD, "out.log"),
+        ]
+
+    def test_multi_digit_fd_redirection(self):
+        toks = ShellLexer("cmd 10> file").tokenize()
+        assert _values(toks, TokenType.REDIRECT) == ["10>"]
+
+    def test_2_append_redirection(self):
+        toks = ShellLexer("cmd 2>> err.log").tokenize()
+        assert _values(toks, TokenType.REDIRECT) == ["2>>"]
+
+
+class TestLogicalAndBackgroundOperators:
+    """&&, ||, & (background), ; produce dedicated token types."""
+
+    def test_and_or(self):
+        toks = ShellLexer("cmd1 && cmd2 || cmd3").tokenize()
+        assert _values(toks) == [
+            (TokenType.WORD, "cmd1"),
+            (TokenType.AND, "&&"),
+            (TokenType.WORD, "cmd2"),
+            (TokenType.OR, "||"),
+            (TokenType.WORD, "cmd3"),
+        ]
+
+    def test_background_at_end(self):
+        toks = ShellLexer("sleep 1 &").tokenize()
+        types = [t.type for t in toks if t.type != TokenType.EOF]
+        assert types[-1] == TokenType.BACKGROUND
+
+    def test_semicolon_then_command(self):
+        toks = ShellLexer("a; b; c").tokenize()
+        types = [t.type for t in toks if t.type != TokenType.EOF]
+        assert types == [
+            TokenType.WORD,
+            TokenType.SEMICOLON,
+            TokenType.WORD,
+            TokenType.SEMICOLON,
+            TokenType.WORD,
+        ]
+
+
+class TestQuotesAndPlainNumbers:
+    """Numbers in argument position stay WORDs; quoted operators stay literal."""
+
+    def test_plain_number_is_word(self):
+        toks = ShellLexer("echo 2 ok").tokenize()
+        assert _values(toks) == [
+            (TokenType.WORD, "echo"),
+            (TokenType.WORD, "2"),
+            (TokenType.WORD, "ok"),
+        ]
+
+    def test_quoted_redirection_text_stays_word(self):
+        toks = ShellLexer('echo "keep 2>&1 inside quotes"').tokenize()
+        assert _values(toks) == [
+            (TokenType.WORD, "echo"),
+            (TokenType.WORD, "keep 2>&1 inside quotes"),
+        ]
+
+    def test_quoted_amp_stays_word(self):
+        toks = ShellLexer("echo 'a && b'").tokenize()
+        assert _values(toks) == [
+            (TokenType.WORD, "echo"),
+            (TokenType.WORD, "a && b"),
+        ]
+
+
+class TestLexerForwardProgress:
+    """Safety-net guarantee: tokenize() must always make forward progress."""
+
+    @pytest.mark.timeout(2)
+    def test_lone_amp_does_not_hang(self):
+        toks = ShellLexer("&").tokenize()
+        assert toks[-1].type == TokenType.EOF
+
+    @pytest.mark.timeout(2)
+    def test_lone_semicolon_does_not_hang(self):
+        toks = ShellLexer(";").tokenize()
+        assert toks[-1].type == TokenType.EOF
+
+    @pytest.mark.timeout(2)
+    def test_empty_input_eof_only(self):
+        toks = ShellLexer("").tokenize()
+        assert [t.type for t in toks] == [TokenType.EOF]
+
+    @pytest.mark.timeout(2)
+    def test_only_whitespace(self):
+        toks = ShellLexer("   \t  ").tokenize()
+        assert [t.type for t in toks] == [TokenType.EOF]
+
+    @pytest.mark.timeout(2)
+    def test_unhandled_chars_do_not_hang(self):
+        # Backticks and other chars without a dedicated handler must still
+        # let the lexer terminate, courtesy of the new safety net.
+        toks = ShellLexer("foo `bar` baz").tokenize()
+        assert toks[-1].type == TokenType.EOF
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

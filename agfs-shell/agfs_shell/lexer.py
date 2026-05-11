@@ -20,6 +20,10 @@ class TokenType(Enum):
     PIPE = "pipe"
     REDIRECT = "redirect"
     COMMENT = "comment"
+    BACKGROUND = "background"   # & (run in background / pipeline terminator)
+    SEMICOLON = "semicolon"     # ; (statement separator)
+    AND = "and"                 # && (logical AND)
+    OR = "or"                   # || (logical OR)
     EOF = "eof"
 
 
@@ -153,6 +157,36 @@ class ShellLexer:
 
         return ''.join(result)
 
+    def _consume(self) -> str:
+        """Advance one character and return it as a str (empty at EOF)."""
+        ch = self.advance()
+        return ch if ch is not None else ''
+
+    def _consume_fd_dup_suffix(self, redir: str) -> str:
+        """
+        If the next char is '&' followed by digits or '-', consume it as a
+        file-descriptor duplication / close suffix (e.g. '>&1', '2>&1', '>&-').
+
+        Returns the (possibly extended) redirection token.
+        """
+        if self.peek() != '&':
+            return redir
+        # Only treat '&' as a duplication marker when followed by a digit or '-'.
+        # Otherwise '&' belongs to the next token (background, &&, &>).
+        nxt = self.peek(1)
+        if nxt is None or not (nxt.isdigit() or nxt == '-'):
+            return redir
+        redir += self._consume()  # consume '&'
+        # Digits (file descriptor number) or '-' (close fd)
+        if self.peek() == '-':
+            redir += self._consume()
+        else:
+            nxt = self.peek()
+            while nxt is not None and nxt.isdigit():
+                redir += self._consume()
+                nxt = self.peek()
+        return redir
+
     def tokenize(self) -> List[Token]:
         """
         Tokenize the entire input
@@ -180,32 +214,83 @@ class ShellLexer:
                 tokens.append(Token(TokenType.COMMENT, ''.join(comment), start_pos))
                 continue
 
-            # Check for pipe
+            # Logical OR: ||
+            if char == '|' and self.peek(1) == '|':
+                self.advance()
+                self.advance()
+                tokens.append(Token(TokenType.OR, '||', start_pos))
+                continue
+
+            # Pipe: |
             if char == '|':
                 self.advance()
                 tokens.append(Token(TokenType.PIPE, '|', start_pos))
                 continue
 
-            # Check for redirections
-            if char == '>':
-                redir = self.advance()
+            # &> or &>> (redirect both stdout and stderr)
+            if char == '&' and self.peek(1) == '>':
+                redir = self._consume() + self._consume()  # '&>'
                 if self.peek() == '>':
-                    redir += self.advance()
+                    redir += self._consume()  # '&>>'
                 tokens.append(Token(TokenType.REDIRECT, redir, start_pos))
                 continue
 
+            # Logical AND: &&
+            if char == '&' and self.peek(1) == '&':
+                self.advance()
+                self.advance()
+                tokens.append(Token(TokenType.AND, '&&', start_pos))
+                continue
+
+            # Background: &
+            if char == '&':
+                self.advance()
+                tokens.append(Token(TokenType.BACKGROUND, '&', start_pos))
+                continue
+
+            # Statement separator: ;
+            if char == ';':
+                self.advance()
+                tokens.append(Token(TokenType.SEMICOLON, ';', start_pos))
+                continue
+
+            # Output redirection: >, >>, >&N, >&-
+            if char == '>':
+                redir = self._consume()
+                if self.peek() == '>':
+                    redir += self._consume()
+                redir = self._consume_fd_dup_suffix(redir)
+                tokens.append(Token(TokenType.REDIRECT, redir, start_pos))
+                continue
+
+            # Input redirection: <, <<, <&N
             if char == '<':
-                redir = self.advance()
+                redir = self._consume()
                 if self.peek() == '<':
-                    redir += self.advance()
+                    redir += self._consume()
+                redir = self._consume_fd_dup_suffix(redir)
                 tokens.append(Token(TokenType.REDIRECT, redir, start_pos))
                 continue
 
-            if char == '2':
-                if self.peek(1) == '>':
-                    redir = self.advance() + self.advance()
-                    if self.peek() == '>':
-                        redir += self.advance()
+            # FD-prefixed redirection: NUM> NUM>> NUM>&M NUM>&-
+            # Only consume the digit prefix if it is actually followed by a
+            # redirection operator, so plain numeric words still tokenize as WORDs.
+            if char is not None and char.isdigit():
+                # Look past any consecutive digits for '>' or '<'
+                lookahead = 1
+                ahead = self.peek(lookahead)
+                while ahead is not None and ahead.isdigit():
+                    lookahead += 1
+                    ahead = self.peek(lookahead)
+                if self.peek(lookahead) in ('>', '<'):
+                    redir = ''
+                    for _ in range(lookahead):
+                        redir += self._consume()
+                    # Consume operator
+                    redir += self._consume()  # '>' or '<'
+                    if self.peek() == redir[-1]:  # '>>' or '<<'
+                        redir += self._consume()
+                    redir = self._consume_fd_dup_suffix(redir)
                     tokens.append(Token(TokenType.REDIRECT, redir, start_pos))
                     continue
 
@@ -213,6 +298,14 @@ class ShellLexer:
             word = self.read_word()
             if word:
                 tokens.append(Token(TokenType.WORD, word, start_pos))
+                continue
+
+            # Safety net: ensure forward progress so we never loop forever on
+            # an unrecognized character. read_word may stop at a special char
+            # without consuming it; if nothing else advanced pos either, skip
+            # the offending byte rather than spin.
+            if self.pos == start_pos:
+                self.advance()
 
         tokens.append(Token(TokenType.EOF, '', self.pos))
         return tokens
