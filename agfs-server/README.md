@@ -72,19 +72,33 @@ The easiest way to get started is using Docker:
     make build
     ```
 
-2.  **Run with default configuration** (port 8080):
+2.  **Run in development mode** (port 8080):
     ```bash
-    ./build/agfs-server
+    make dev
+    ```
+    `make dev` uses `config.yaml` when it exists, otherwise it uses the read-only `config.example.yaml` shipped in the repository.
+
+3.  **Run the built binary**:
+    ```bash
+    make run
     ```
 
-3.  **Run with custom configuration**:
+4.  **Customize configuration**:
     ```bash
-    ./build/agfs-server -c config.yaml
+    cp config.example.yaml config.yaml
+    make dev CONFIG=config.yaml
+    ```
+    Keep `config.example.yaml` unchanged; copy it to `config.yaml` for local edits.
+
+5.  **Run with an explicit config or a different port**:
+    ```bash
+    ./build/agfs-server -c config.example.yaml -addr :9000
+    make dev CONFIG=config.yaml ADDR=:9000
     ```
 
-4.  **Run on a different port**:
+6.  **Verify the server is running**:
     ```bash
-    ./build/agfs-server -addr :9000
+    curl http://localhost:8080/api/v1/health
     ```
 
 ### Basic Usage
@@ -108,7 +122,7 @@ curl "http://localhost:8080/api/v1/files?path=/memfs/hello.txt"
 
 ## Configuration
 
-The server is configured using a YAML file (default: `config.yaml`).
+The server is configured using a YAML file (default: `config.yaml` for the binary). Source-development Makefile targets fall back to `config.example.yaml` when `config.yaml` is absent, so a fresh checkout can start without mutating the example config.
 
 ### Structure
 

@@ -7,8 +7,11 @@ set -e
 REPO="c4pt0r/agfs"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 AGFS_SHELL_DIR="${AGFS_SHELL_DIR:-$HOME/.local/agfs-shell}"
+AGFS_SYSTEM_CONFIG="${AGFS_SYSTEM_CONFIG:-/etc/agfs.yaml}"
+AGFS_DIRECT_CONFIG="${AGFS_DIRECT_CONFIG:-$HOME/.config/agfs/config.yaml}"
 INSTALL_SERVER="${INSTALL_SERVER:-yes}"
 INSTALL_CLIENT="${INSTALL_CLIENT:-yes}"
+CONFIG_URL="https://raw.githubusercontent.com/$REPO/master/agfs-server/config.example.yaml"
 
 # Detect OS and architecture
 detect_platform() {
@@ -137,10 +140,35 @@ install_server() {
 
     echo "✓ agfs-server installed to $INSTALL_DIR/agfs-server"
 
+    install_direct_config
+
     # Install systemd service on Linux systems
     if [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
         install_systemd_service
     fi
+}
+
+# Install default config for direct server runs
+install_direct_config() {
+    TMP_CONFIG=$(mktemp)
+
+    if ! curl -fsSL -o "$TMP_CONFIG" "$CONFIG_URL" 2>/dev/null; then
+        echo "Error: Could not download default config from $CONFIG_URL"
+        echo "Direct server runs need an explicit config, for example:"
+        echo "  agfs-server -c /path/to/config.yaml"
+        rm -f "$TMP_CONFIG"
+        return 1
+    fi
+
+    if [ -f "$AGFS_DIRECT_CONFIG" ]; then
+        echo "✓ existing direct-run config preserved at $AGFS_DIRECT_CONFIG"
+    else
+        mkdir -p "$(dirname "$AGFS_DIRECT_CONFIG")"
+        cp "$TMP_CONFIG" "$AGFS_DIRECT_CONFIG"
+        echo "✓ default direct-run config installed to $AGFS_DIRECT_CONFIG"
+    fi
+
+    rm -f "$TMP_CONFIG"
 }
 
 # Install systemd service
@@ -151,10 +179,19 @@ install_systemd_service() {
     # Download service file template (use master branch, not release tag)
     SERVICE_URL="https://raw.githubusercontent.com/$REPO/master/agfs-server/agfs-server.service"
     TMP_SERVICE=$(mktemp)
+    TMP_CONFIG=$(mktemp)
 
     if ! curl -fsSL -o "$TMP_SERVICE" "$SERVICE_URL" 2>/dev/null; then
         echo "Warning: Could not download systemd service file, skipping service installation"
-        rm -f "$TMP_SERVICE"
+        rm -f "$TMP_SERVICE" "$TMP_CONFIG"
+        return 1
+    fi
+
+    if ! curl -fsSL -o "$TMP_CONFIG" "$CONFIG_URL" 2>/dev/null; then
+        echo "Error: Could not download default config from $CONFIG_URL"
+        echo "Systemd service requires a config file at $AGFS_SYSTEM_CONFIG."
+        echo "Create one manually from agfs-server/config.example.yaml, then rerun this installer."
+        rm -f "$TMP_SERVICE" "$TMP_CONFIG"
         return 1
     fi
 
@@ -166,11 +203,27 @@ install_systemd_service() {
     sed -e "s|%USER%|$CURRENT_USER|g" \
         -e "s|%GROUP%|$CURRENT_GROUP|g" \
         -e "s|%INSTALL_DIR%|$INSTALL_DIR|g" \
+        -e "s|%CONFIG%|$AGFS_SYSTEM_CONFIG|g" \
         "$TMP_SERVICE" > "$TMP_SERVICE.processed"
+
+    if ! grep -F "ExecStart=" "$TMP_SERVICE.processed" | grep -F -- "-c $AGFS_SYSTEM_CONFIG" >/dev/null 2>&1; then
+        echo "Error: Rendered systemd service does not reference the intended config path."
+        echo "Expected ExecStart to include: -c $AGFS_SYSTEM_CONFIG"
+        echo "Template source: $SERVICE_URL"
+        echo "The downloaded service template may be stale, malformed, or using a mismatched config path."
+        rm -f "$TMP_SERVICE" "$TMP_SERVICE.processed" "$TMP_CONFIG"
+        return 1
+    fi
 
     # Install systemd service (requires root/sudo)
     if [ "$CURRENT_USER" = "root" ]; then
         # Running as root
+        if [ ! -f "$AGFS_SYSTEM_CONFIG" ]; then
+            cp "$TMP_CONFIG" "$AGFS_SYSTEM_CONFIG"
+            echo "✓ default config installed to $AGFS_SYSTEM_CONFIG"
+        else
+            echo "✓ existing config preserved at $AGFS_SYSTEM_CONFIG"
+        fi
         cp "$TMP_SERVICE.processed" /etc/systemd/system/agfs-server.service
         systemctl daemon-reload
         echo "✓ systemd service installed to /etc/systemd/system/agfs-server.service"
@@ -180,10 +233,18 @@ install_systemd_service() {
         echo "  systemctl start agfs-server"
     else
         # Require sudo with password prompt
-        echo "Installing systemd service requires root privileges."
+        echo "Installing systemd service and config requires root privileges."
+        if ! sudo sh -c "test -f '$AGFS_SYSTEM_CONFIG' || cp '$TMP_CONFIG' '$AGFS_SYSTEM_CONFIG'"; then
+            echo "Error: Failed to install default config at $AGFS_SYSTEM_CONFIG (sudo required)"
+            echo "Install it manually with:"
+            echo "  curl -fsSL $CONFIG_URL | sudo tee $AGFS_SYSTEM_CONFIG >/dev/null"
+            rm -f "$TMP_SERVICE" "$TMP_SERVICE.processed" "$TMP_CONFIG"
+            return 1
+        fi
+        echo "✓ config ready at $AGFS_SYSTEM_CONFIG"
         if ! sudo cp "$TMP_SERVICE.processed" /etc/systemd/system/agfs-server.service; then
             echo "Error: Failed to install systemd service (sudo required)"
-            rm -f "$TMP_SERVICE" "$TMP_SERVICE.processed"
+            rm -f "$TMP_SERVICE" "$TMP_SERVICE.processed" "$TMP_CONFIG"
             return 1
         fi
         sudo systemctl daemon-reload
@@ -194,7 +255,7 @@ install_systemd_service() {
         echo "  sudo systemctl start agfs-server"
     fi
 
-    rm -f "$TMP_SERVICE" "$TMP_SERVICE.processed"
+    rm -f "$TMP_SERVICE" "$TMP_SERVICE.processed" "$TMP_CONFIG"
 }
 
 # Install agfs-shell
@@ -279,6 +340,10 @@ show_completion() {
         echo "Server: agfs-server"
         echo "  Location: $INSTALL_DIR/agfs-server"
         echo "  Usage: agfs-server --help"
+        echo "  Direct-run config: $AGFS_DIRECT_CONFIG"
+        if [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
+            echo "  Service config: $AGFS_SYSTEM_CONFIG"
+        fi
         echo ""
     fi
 
@@ -303,7 +368,16 @@ show_completion() {
     esac
 
     echo "Quick Start:"
-    echo "  1. Start server: agfs-server"
+    if [ "$OS" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
+        if [ "$(whoami)" = "root" ]; then
+            echo "  1. Start server: systemctl start agfs-server"
+        else
+            echo "  1. Start server: sudo systemctl start agfs-server"
+        fi
+        echo "     Or run directly: agfs-server -c $AGFS_DIRECT_CONFIG"
+    else
+        echo "  1. Start server: agfs-server -c $AGFS_DIRECT_CONFIG"
+    fi
     echo "  2. Use client: agfs"
 }
 
