@@ -2,12 +2,14 @@ package agfs
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,10 +19,18 @@ var (
 	ErrNotSupported = fmt.Errorf("operation not supported")
 )
 
+// DefaultStreamingProgressTimeout is the default per-chunk inactivity
+// bound applied to streaming reads (ReadStream, ReadHandleStream). It
+// caps how long the client will wait between bytes arriving from the
+// server, without capping total stream duration. Override on a Client
+// via SetStreamingProgressTimeout; pass <=0 to disable.
+const DefaultStreamingProgressTimeout = 60 * time.Second
+
 // Client is a Go client for AGFS HTTP API
 type Client struct {
-	baseURL    string
-	httpClient *http.Client
+	baseURL                  string
+	httpClient               *http.Client
+	streamingProgressTimeout time.Duration
 }
 
 // NewClient creates a new AGFS client
@@ -33,15 +43,119 @@ func NewClient(baseURL string) *Client {
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+		streamingProgressTimeout: DefaultStreamingProgressTimeout,
 	}
 }
 
 // NewClientWithHTTPClient creates a new AGFS client with custom HTTP client
 func NewClientWithHTTPClient(baseURL string, httpClient *http.Client) *Client {
 	return &Client{
-		baseURL:    normalizeBaseURL(baseURL),
-		httpClient: httpClient,
+		baseURL:                  normalizeBaseURL(baseURL),
+		httpClient:               httpClient,
+		streamingProgressTimeout: DefaultStreamingProgressTimeout,
 	}
+}
+
+// SetStreamingProgressTimeout configures the per-chunk inactivity
+// timeout for streaming reads (ReadStream, ReadHandleStream). A value
+// of <=0 disables the bound and restores the pre-2026-05 behaviour
+// where a stalled server can hang the client indefinitely — only set
+// that explicitly for callers who know they're tolerant to such hangs
+// (e.g. interactive use with a hard ^C).
+//
+// The bound applies *between* bytes arriving on the wire, not to the
+// total stream duration; long streams that keep making progress are
+// unaffected.
+func (c *Client) SetStreamingProgressTimeout(d time.Duration) {
+	c.streamingProgressTimeout = d
+}
+
+// progressReader wraps an http.Response body with an inactivity
+// timeout. Each successful Read signals progress; if no progress
+// arrives within `timeout`, the request context is canceled, which
+// closes the underlying connection and causes the next Read to return
+// an error.
+//
+// When timeout is <= 0 the watchdog goroutine is not started and the
+// reader behaves as a pure passthrough (apart from canceling the
+// request context on Close to free resources).
+type progressReader struct {
+	body      io.ReadCloser
+	cancel    context.CancelFunc
+	progress  chan struct{}
+	done      chan struct{}
+	timeout   time.Duration
+	closeOnce sync.Once
+}
+
+func newProgressReader(body io.ReadCloser, cancel context.CancelFunc, timeout time.Duration) *progressReader {
+	pr := &progressReader{
+		body:    body,
+		cancel:  cancel,
+		timeout: timeout,
+	}
+	if timeout > 0 {
+		pr.progress = make(chan struct{}, 1)
+		pr.done = make(chan struct{})
+		go pr.watchdog()
+	}
+	return pr
+}
+
+func (pr *progressReader) watchdog() {
+	timer := time.NewTimer(pr.timeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-pr.progress:
+			// Drain a previously-fired tick before resetting, per the
+			// time.Timer.Reset documentation contract.
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(pr.timeout)
+		case <-timer.C:
+			// No progress within timeout. Cancel the request context —
+			// the in-flight Read on body will surface an error so the
+			// caller observes the timeout.
+			pr.cancel()
+			return
+		case <-pr.done:
+			return
+		}
+	}
+}
+
+// Read forwards to the underlying body and signals progress to the
+// watchdog on any non-zero read.
+func (pr *progressReader) Read(p []byte) (int, error) {
+	n, err := pr.body.Read(p)
+	if n > 0 && pr.progress != nil {
+		// Non-blocking send: drop the signal if the watchdog hasn't
+		// drained the previous one yet. The watchdog only needs to know
+		// that progress is happening, not its rate.
+		select {
+		case pr.progress <- struct{}{}:
+		default:
+		}
+	}
+	return n, err
+}
+
+// Close releases the body and cancels the request context. Safe to
+// call multiple times.
+func (pr *progressReader) Close() error {
+	pr.closeOnce.Do(func() {
+		if pr.done != nil {
+			close(pr.done)
+		}
+		pr.cancel()
+	})
+	return pr.body.Close()
 }
 
 // normalizeBaseURL ensures the base URL ends with /api/v1
@@ -532,31 +646,42 @@ func (c *Client) GetCapabilities() (*CapabilitiesResponse, error) {
 	return &caps, nil
 }
 
-// ReadStream opens a streaming connection to read from a file
-// Returns an io.ReadCloser that streams data from the server
-// The caller is responsible for closing the reader
+// ReadStream opens a streaming connection to read from a file.
+// Returns an io.ReadCloser that streams data from the server. The
+// caller is responsible for closing the reader.
+//
+// The total stream is intentionally not bounded by an http.Client
+// Timeout (which would kill long but well-behaved streams). The
+// returned reader does enforce a per-chunk *inactivity* timeout
+// controlled by Client.SetStreamingProgressTimeout (default 60s) — a
+// server that goes silent mid-stream surfaces a Read error rather than
+// hanging the caller indefinitely.
 func (c *Client) ReadStream(path string) (io.ReadCloser, error) {
 	query := url.Values{}
 	query.Set("path", path)
 	query.Set("stream", "true") // Enable streaming mode
 
-	// Create request with no timeout for streaming
-	streamClient := &http.Client{
-		Timeout: 0, // No timeout for streaming
-	}
+	// No overall request timeout — per-chunk inactivity is bounded by
+	// the progressReader wrapper below.
+	streamClient := &http.Client{Timeout: 0}
+
+	ctx, cancel := context.WithCancel(context.Background())
 
 	reqURL := fmt.Sprintf("%s/files?%s", c.baseURL, query.Encode())
-	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	resp, err := streamClient.Do(req)
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		cancel()
 		defer resp.Body.Close()
 		var errResp ErrorResponse
 		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
@@ -565,9 +690,10 @@ func (c *Client) ReadStream(path string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, errResp.Error)
 	}
 
-	// Return the response body as a ReadCloser
-	// Caller must close it when done
-	return resp.Body, nil
+	// Wrap with a progress watchdog. When the configured timeout is
+	// <=0, the wrapper is a passthrough that still cancels the request
+	// context on Close so HTTP resources are released cleanly.
+	return newProgressReader(resp.Body, cancel, c.streamingProgressTimeout), nil
 }
 
 // GrepRequest represents a grep search request
@@ -770,29 +896,34 @@ func (c *Client) ReadHandle(handleID int64, offset int64, size int) ([]byte, err
 	return data, nil
 }
 
-// ReadHandleStream opens a streaming connection to read from a file handle
-// Returns an io.ReadCloser that streams data from the server
-// The caller is responsible for closing the reader
+// ReadHandleStream opens a streaming connection to read from a file
+// handle. Returns an io.ReadCloser that streams data from the server;
+// the caller is responsible for closing it.
+//
+// Like ReadStream, the returned reader applies a per-chunk inactivity
+// timeout (Client.SetStreamingProgressTimeout, default 60s) so a
+// stalled server cannot wedge the caller indefinitely.
 func (c *Client) ReadHandleStream(handleID int64) (io.ReadCloser, error) {
 	endpoint := fmt.Sprintf("/handles/%d/stream", handleID)
 
-	// Create request with no timeout for streaming
-	streamClient := &http.Client{
-		Timeout: 0, // No timeout for streaming
-	}
+	streamClient := &http.Client{Timeout: 0}
+	ctx, cancel := context.WithCancel(context.Background())
 
 	reqURL := fmt.Sprintf("%s%s", c.baseURL, endpoint)
-	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	resp, err := streamClient.Do(req)
 	if err != nil {
+		cancel()
 		return nil, fmt.Errorf("failed to execute request: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		cancel()
 		defer resp.Body.Close()
 		var errResp ErrorResponse
 		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
@@ -801,7 +932,7 @@ func (c *Client) ReadHandleStream(handleID int64) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, errResp.Error)
 	}
 
-	return resp.Body, nil
+	return newProgressReader(resp.Body, cancel, c.streamingProgressTimeout), nil
 }
 
 // WriteHandle writes data to a file handle

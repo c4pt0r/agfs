@@ -11,7 +11,19 @@ from .exceptions import AGFSClientError, AGFSNotSupportedError
 class AGFSClient:
     """Client for interacting with AGFS (Plugin-based File System) Server API"""
 
-    def __init__(self, api_base_url="http://localhost:8080", timeout=10):
+    #: Default per-chunk progress timeout (seconds) for streaming reads and
+    #: writes. Long-running streams used to disable timeouts entirely
+    #: (``timeout=None``), which let a stalled server wedge the client
+    #: indefinitely. This bounds *inter-chunk* idle time without bounding
+    #: total request duration.
+    DEFAULT_STREAMING_PROGRESS_TIMEOUT = 60
+
+    def __init__(
+        self,
+        api_base_url="http://localhost:8080",
+        timeout=10,
+        streaming_progress_timeout=DEFAULT_STREAMING_PROGRESS_TIMEOUT,
+    ):
         """
         Initialize AGFS client.
 
@@ -19,7 +31,17 @@ class AGFSClient:
             api_base_url: API base URL. Can be either full URL with "/api/v1" or just the base.
                          If "/api/v1" is not present, it will be automatically appended.
                          e.g., "http://localhost:8080" or "http://localhost:8080/api/v1"
-            timeout: Request timeout in seconds (default: 10)
+            timeout: Request timeout in seconds for non-streaming requests
+                (default: 10). For streaming endpoints, see
+                ``streaming_progress_timeout`` — this value only applies
+                to the connect phase of the request.
+            streaming_progress_timeout: Per-chunk progress timeout in
+                seconds for streaming endpoints (default: 60). The total
+                stream may run as long as needed, but a server that
+                stops sending bytes for this long will trigger a
+                :class:`requests.exceptions.ReadTimeout`. Set to ``None``
+                to opt out (matches pre-2026-05 behaviour); not
+                recommended for unattended agents.
         """
         api_base_url = api_base_url.rstrip("/")
         # Auto-append /api/v1 if not present
@@ -28,6 +50,21 @@ class AGFSClient:
         self.api_base = api_base_url
         self.session = requests.Session()
         self.timeout = timeout
+        self.streaming_progress_timeout = streaming_progress_timeout
+
+    def _streaming_timeout(self):
+        """Tuple suitable for ``requests`` ``timeout=`` on streaming calls.
+
+        ``(connect_timeout, read_timeout)`` — the read leg is requests'
+        per-chunk inactivity timeout, which is exactly the per-chunk
+        progress bound this method enforces.
+
+        Returns ``None`` if ``streaming_progress_timeout`` was set to
+        ``None`` (opt-out path).
+        """
+        if self.streaming_progress_timeout is None:
+            return None
+        return (self.timeout, self.streaming_progress_timeout)
 
     def _handle_request_error(self, e: Exception, operation: str = "request") -> None:
         """Convert request exceptions to user-friendly error messages"""
@@ -153,12 +190,15 @@ class AGFSClient:
 
             if stream:
                 params["stream"] = "true"
-                # Streaming mode - return response object for iteration
+                # Streaming mode - return response object for iteration.
+                # Use a per-chunk progress timeout (the read leg of the
+                # tuple) so a stalled server can't wedge callers forever.
+                # Setting ``streaming_progress_timeout=None`` opts out.
                 response = self.session.get(
                     f"{self.api_base}/files",
                     params=params,
                     stream=True,
-                    timeout=None  # No timeout for streaming
+                    timeout=self._streaming_timeout(),
                 )
                 response.raise_for_status()
                 return response
@@ -190,14 +230,16 @@ class AGFSClient:
         Returns:
             Response message from server
         """
-        # Calculate timeout based on file size (if known)
-        # For streaming data, use a larger default timeout
+        # Calculate timeout based on file size (if known).
+        # For streaming data we used to set ``write_timeout = None`` which
+        # let a stalled server hang the client forever. Replace with the
+        # per-chunk streaming progress timeout — total upload time can
+        # still grow without bound, but inter-chunk silence is bounded.
         if isinstance(data, bytes):
             data_size_mb = len(data) / (1024 * 1024)
             write_timeout = max(10, min(300, int(data_size_mb * 1 + 10)))
         else:
-            # For streaming/unknown size, use no timeout
-            write_timeout = None
+            write_timeout = self._streaming_timeout()
 
         last_error = None
 
@@ -607,8 +649,8 @@ class AGFSClient:
             response = self.session.post(
                 f"{self.api_base}/grep",
                 json=request_body,
-                timeout=None if stream else self.timeout,
-                stream=stream
+                timeout=self._streaming_timeout() if stream else self.timeout,
+                stream=stream,
             )
             response.raise_for_status()
 
