@@ -81,7 +81,6 @@ func parseOpenFlags(flagStr string) (filesystem.OpenFlag, error) {
 	return filesystem.OpenFlag(num), nil
 }
 
-
 // getHandleFS checks if the filesystem supports HandleFS and returns it
 func (h *Handler) getHandleFS() (filesystem.HandleFS, error) {
 	handleFS, ok := h.fs.(filesystem.HandleFS)
@@ -298,9 +297,9 @@ func (h *Handler) HandleWrite(w http.ResponseWriter, r *http.Request, handleIDSt
 		return
 	}
 
-	data, err := io.ReadAll(r.Body)
+	data, err := readLimitedRequestBody(w, r, h.maxRequestBodyBytes)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "failed to read request body")
+		writeRequestBodyError(w, err, h.maxRequestBodyBytes, "failed to read request body")
 		return
 	}
 
