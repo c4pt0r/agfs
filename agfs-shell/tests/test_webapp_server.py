@@ -16,7 +16,7 @@ def test_validate_webapp_dist_requires_index_html(tmp_path):
     assert "Web app build output not found" in message
     assert str(dist_dir / "index.html") in message
     assert "cd agfs-shell/webapp" in message
-    assert "npm install" in message
+    assert "npm ci" in message
     assert "npm run build" in message
     assert "./setup.sh" in message
 

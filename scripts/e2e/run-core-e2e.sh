@@ -101,10 +101,8 @@ webapp_smoke() {
 
   echo "[e2e] webapp lockfile/build smoke"
   (
-    cd "$WEBAPP_DIR"
-    npm ci >/dev/null
-    npm run build >/dev/null
-    test -f dist/index.html
+    cd "$SHELL_DIR"
+    AGFS_RUN_E2E=1 AGFS_API_URL="$BASE_URL" uv run pytest tests/test_docs_webapp_e2e.py -q
   )
 }
 

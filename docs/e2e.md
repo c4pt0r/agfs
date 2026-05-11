@@ -20,7 +20,7 @@ Run from the repository root:
 scripts/e2e/run-core-e2e.sh
 ```
 
-The harness starts a local `agfs-server` on `127.0.0.1:18080`, waits for `/api/v1/health`, checks `/api/v1/ready`, exercises a QueueFS enqueue/dequeue through the HTTP file API, runs a real local `agfs-shell` pipeline while the server is live, and builds the webapp from the committed lockfile.
+The harness starts a local `agfs-server` on `127.0.0.1:18080`, waits for `/api/v1/health`, checks `/api/v1/ready`, exercises a QueueFS enqueue/dequeue through the HTTP file API, runs a real local `agfs-shell` pipeline while the server is live, and runs the docs/webapp E2E lane. The webapp lane checks first-run guide commands, the source `make dev` config fallback, missing-dist fail-fast behavior, lockfile install/build, and integrated webapp startup serving the built index.
 
 Useful environment overrides:
 
@@ -35,5 +35,7 @@ Useful environment overrides:
 - Backend/server e2e cases live under task #25.
 - Shell/SDK/pipeline e2e cases live under task #26.
 - Docs/webapp/first-run e2e cases live under task #27.
+
+Lane tests may overlap the core harness when they need to exercise the same user-visible behavior in more detail; the core harness is the shared smoke gate, not a deduplication target.
 
 Cross-review should block a patch when a realistic user path exists but the author only provided unit tests.
