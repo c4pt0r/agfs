@@ -36,3 +36,8 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["pyagfs"]
+
+[tool.pytest.ini_options]
+markers = [
+    "e2e: opt-in end-to-end tests that exercise the SDK against a real agfs-server subprocess",
+]
