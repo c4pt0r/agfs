@@ -3,6 +3,9 @@ TAIL command - output the last part of files.
 """
 
 import time
+
+from pyagfs.exceptions import AGFSClientError
+
 from ..process import Process
 from ..command_decorators import command
 from . import register_command
@@ -143,11 +146,17 @@ def cmd_tail(process: Process) -> int:
                         while True:
                             time.sleep(0.1)  # Poll every 100ms
 
-                            # Check file size
+                            # Check file size. Only "file disappeared
+                            # / unreadable" (AGFSClientError) is a
+                            # legitimate continue case here. Anything
+                            # else (programmer error, broken
+                            # filesystem object) must bubble — otherwise
+                            # `tail -f` becomes an infinite no-op on
+                            # the buggy condition.
                             try:
                                 file_info = process.context.filesystem.get_file_info(filename)
                                 new_size = file_info.get('size', 0)
-                            except Exception:
+                            except AGFSClientError:
                                 # File might not exist yet, keep waiting
                                 continue
 

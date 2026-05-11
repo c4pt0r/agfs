@@ -2,6 +2,8 @@
 LLM command - (auto-migrated from builtins.py)
 """
 
+from pyagfs.exceptions import AGFSClientError
+
 from ..process import Process
 from ..command_decorators import command
 from . import register_command
@@ -117,17 +119,39 @@ def cmd_llm(process: Process) -> int:
             prompt_parts.append(arg)
             i += 1
 
-    # Load configuration from file if it exists
+    # Load configuration from file if it exists. The catches here are
+    # narrowed so that genuine programmer errors aren't masked as
+    # "config missing or unparseable" — every previously-silenced
+    # exception type is documented inline.
+    #
+    # ``_yaml`` and ``_config_parse_errors`` are resolved up front so
+    # the except-clause below can name the exact failure modes we
+    # intend to silence without depending on whether ``import yaml``
+    # succeeded in this scope.
+    _yaml = None
+    _config_parse_errors: tuple = (UnicodeDecodeError, ValueError)
+    try:
+        import yaml as _yaml_imported
+        _yaml = _yaml_imported
+        _config_parse_errors = _config_parse_errors + (_yaml.YAMLError,)
+    except ImportError:
+        pass
+
     config = {}
     try:
         if process.context.filesystem:
             config_content = process.context.filesystem.read_file(config_path)
             if config_content:
                 try:
-                    import yaml
-                    config = yaml.safe_load(config_content.decode('utf-8'))
-                    if not isinstance(config, dict):
-                        config = {}
+                    if _yaml is not None:
+                        config = _yaml.safe_load(config_content.decode('utf-8'))
+                        if not isinstance(config, dict):
+                            config = {}
+                    else:
+                        # PyYAML not available — fall back to simple
+                        # key=value parsing handled in the ImportError
+                        # branch below.
+                        raise ImportError("yaml unavailable")
                 except ImportError:
                     # If PyYAML not available, try simple key=value parsing
                     config_text = config_content.decode('utf-8')
@@ -137,10 +161,20 @@ def cmd_llm(process: Process) -> int:
                         if line and not line.startswith('#') and ':' in line:
                             key, value = line.split(':', 1)
                             config[key.strip()] = value.strip()
-                except Exception:
-                    pass  # Ignore config parse errors
-    except Exception:
-        pass  # Config file doesn't exist or can't be read
+                except _config_parse_errors:
+                    # Parse error in the config payload itself — keep
+                    # defaults rather than refuse to start, but only
+                    # silence the documented parse-failure modes.
+                    pass
+    except (AGFSClientError, OSError, UnicodeDecodeError):
+        # AGFSClientError: read_file failed at the filesystem boundary
+        # (server unreachable, permission denied, etc.).
+        # OSError: only relevant for local-file fallback paths.
+        # UnicodeDecodeError: payload isn't valid UTF-8.
+        # Anything else (AttributeError on a broken filesystem mock,
+        # TypeError on bogus arguments, ...) propagates so the bug is
+        # visible during development.
+        pass
 
     # Set defaults from config or hardcoded
     if not model_name:
@@ -227,10 +261,13 @@ def cmd_llm(process: Process) -> int:
         except Exception as e:
             return None, f"Failed to transcribe audio: {str(e)}"
         finally:
-            # Clean up temporary file
+            # Clean up temporary file. Only ``OSError`` is a legitimate
+            # silent failure mode here (file already gone, permission
+            # denied on a sandboxed tmpdir). Anything else (bug in the
+            # cleanup code itself, etc.) should surface.
             try:
                 os.unlink(tmp_path)
-            except Exception:
+            except OSError:
                 pass
 
     # Get input content: from --input-file or stdin
