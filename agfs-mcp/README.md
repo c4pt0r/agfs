@@ -244,6 +244,22 @@ Start a AGFS server first, then:
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | agfs-mcp
 ```
 
+## Troubleshooting
+
+- Verify AGFS before debugging MCP: `curl -sf http://localhost:8080/api/v1/health`.
+- MCP is a stdio JSON-RPC process for an MCP client. It does not open an HTTP port or browser UI.
+- If your MCP client cannot find `agfs-mcp`, use an absolute command path or a `uvx` config:
+  ```json
+  {
+    "command": "uvx",
+    "args": ["--from", "/path/to/agfs-mcp", "agfs-mcp"]
+  }
+  ```
+- If tools fail with connection errors, set `AGFS_SERVER_URL=http://host:8080` in the MCP client environment.
+- If `tools/list` works but AGFS operations fail, confirm plugin mounts with `curl -sf "http://localhost:8080/api/v1/directories?path=/"`.
+
+For the full AGFS first-run matrix, see [../docs/first-run.md](../docs/first-run.md).
+
 ## Architecture
 
 ```

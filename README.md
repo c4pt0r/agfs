@@ -59,6 +59,8 @@ curl http://localhost:8080/api/v1/health
 
 Copy `config.example.yaml` to `config.yaml` only when you need local customization.
 
+For a complete first-run matrix across installer, source, Docker, shell, webapp, FUSE, and MCP paths, see [docs/first-run.md](./docs/first-run.md).
+
 Or via Docker:
 
 ```bash
@@ -248,4 +250,5 @@ See [task_loop.py](./agfs-mcp/demos/task_loop.py) for a complete example.
 - [agfs-server](./agfs-server/README.md) - Server configuration and plugin development
 - [agfs-shell](./agfs-shell/README.md) - Interactive shell client
 - [agfs-fuse](./agfs-fuse/README.md) - FUSE filesystem mount (Linux)
+- [First-run guide](./docs/first-run.md) - install/source/Docker/webapp/FUSE/MCP startup matrix and troubleshooting
 
