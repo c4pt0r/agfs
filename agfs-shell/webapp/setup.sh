@@ -28,7 +28,7 @@ uv sync --extra webapp
 # Install frontend dependencies
 echo "📦 Installing frontend dependencies..."
 cd webapp
-npm install
+npm ci
 
 # Build frontend
 echo "🔨 Building frontend..."

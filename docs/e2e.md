@@ -36,4 +36,8 @@ Useful environment overrides:
 - Shell/SDK/pipeline e2e cases live under task #26.
 - Docs/webapp/first-run e2e cases live under task #27.
 
+Lane tests may overlap the core harness when they need to exercise the same
+user-visible behavior end to end. The core harness is a smoke screen, not a
+deduplication target.
+
 Cross-review should block a patch when a realistic user path exists but the author only provided unit tests.

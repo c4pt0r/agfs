@@ -47,3 +47,8 @@ dev = [
     "pytest-cov>=5.0.0",
     "ruff>=0.14.13",
 ]
+
+[tool.pytest.ini_options]
+markers = [
+    "e2e: opt-in end-to-end tests that exercise real first-run commands and subprocesses",
+]
