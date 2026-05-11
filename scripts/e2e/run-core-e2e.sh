@@ -85,7 +85,7 @@ shell_smoke() {
   (
     cd "$SHELL_DIR"
     uv sync --frozen >/dev/null
-    AGFS_API_URL="$BASE_URL" uv run agfs-shell -c "echo shell-e2e | wc -l" | grep -q "1"
+    AGFS_API_URL="$BASE_URL" uv run --frozen agfs-shell -c "echo shell-e2e | wc -l" | grep -q "1"
   )
 }
 
@@ -102,7 +102,7 @@ webapp_smoke() {
   echo "[e2e] webapp lockfile/build smoke"
   (
     cd "$SHELL_DIR"
-    AGFS_RUN_E2E=1 AGFS_API_URL="$BASE_URL" uv run pytest tests/test_docs_webapp_e2e.py -q
+    AGFS_RUN_E2E=1 AGFS_API_URL="$BASE_URL" uv run --frozen pytest tests/test_docs_webapp_e2e.py -q
   )
 }
 
