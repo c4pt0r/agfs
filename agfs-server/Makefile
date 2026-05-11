@@ -7,6 +7,7 @@ CMD_DIR=cmd/server
 GO=go
 GOFLAGS=-v
 ADDR?=:8080
+CONFIG?=$(if $(wildcard config.yaml),config.yaml,config.example.yaml)
 
 # Build information
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -25,12 +26,12 @@ build: ## Build the server binary
 	@echo "Build complete: $(BUILD_DIR)/$(BINARY_NAME)"
 
 run: build
-	@echo "Starting $(BINARY_NAME) on $(ADDR)..."
-	./$(BUILD_DIR)/$(BINARY_NAME) -addr $(ADDR)
+	@echo "Starting $(BINARY_NAME) on $(ADDR) with config $(CONFIG)..."
+	./$(BUILD_DIR)/$(BINARY_NAME) -c $(CONFIG) -addr $(ADDR)
 
 dev: ## Run the server in development mode (without building binary)
-	@echo "Running server in development mode on $(ADDR)..."
-	$(GO) run $(CMD_DIR)/main.go -addr $(ADDR)
+	@echo "Running server in development mode on $(ADDR) with config $(CONFIG)..."
+	$(GO) run $(CMD_DIR)/main.go -c $(CONFIG) -addr $(ADDR)
 
 install: build ## Install the binary to $GOPATH/bin
 	@echo "Installing $(BINARY_NAME) to $(GOPATH)/bin..."

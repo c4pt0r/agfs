@@ -35,6 +35,30 @@ Install:
 curl -fsSL https://raw.githubusercontent.com/c4pt0r/agfs/master/install.sh | sh
 ```
 
+The installer places a direct-run server config at `~/.config/agfs/config.yaml`; on Linux systems with systemd, it also installs `/etc/agfs.yaml` for the service. After install, start the service and verify it:
+
+```bash
+sudo systemctl start agfs-server
+curl http://localhost:8080/api/v1/health
+```
+
+Without systemd, run the server directly with the installed config:
+
+```bash
+agfs-server -c ~/.config/agfs/config.yaml
+curl http://localhost:8080/api/v1/health
+```
+
+For source development, run the server with the repository example config:
+
+```bash
+cd agfs-server
+make dev
+curl http://localhost:8080/api/v1/health
+```
+
+Copy `config.example.yaml` to `config.yaml` only when you need local customization.
+
 Or via Docker:
 
 ```bash
