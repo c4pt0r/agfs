@@ -325,6 +325,29 @@ PY
   response=$(curl -fsS "$BASE_URL/api/v1/files?path=$sqlite_queue/dequeue")
   [[ "$response" == "{}" ]] || fail "SQLite QueueFS should be empty after concurrent dequeue, got '$response'"
 
+  echo "[backend-e2e] unmount invalidates open handles"
+  local handle_mount="/memfs"
+  local handle_path="$handle_mount/e2e/file.txt"
+  response=$(curl -fsS -X POST "$BASE_URL/api/v1/handles/open?path=$handle_path&flags=2")
+  local handle_id
+  handle_id=$(HANDLE_OPEN_JSON="$response" python3 - <<'PY'
+import json
+import os
+
+print(json.loads(os.environ["HANDLE_OPEN_JSON"])["handle_id"])
+PY
+)
+  response=$(curl -fsS "$BASE_URL/api/v1/handles/$handle_id/read?size=7")
+  [[ "$response" == "backend" ]] || fail "open handle read returned '$response', expected 'backend'"
+  curl -fsS -X POST -H "Content-Type: application/json" \
+    --data "{\"path\":\"$handle_mount\"}" \
+    "$BASE_URL/api/v1/unmount" >/dev/null
+  code=$(http_code GET "$BASE_URL/api/v1/handles/$handle_id/read?size=7" "$TMP_DIR/handle-read-after-unmount.json")
+  [[ "$code" == "404" ]] || fail "handle read after unmount should return 404, got $code with $(cat "$TMP_DIR/handle-read-after-unmount.json")"
+  assert_contains "$(cat "$TMP_DIR/handle-read-after-unmount.json")" "not found"
+  code=$(http_code DELETE "$BASE_URL/api/v1/handles/$handle_id" "$TMP_DIR/handle-close-after-unmount.json")
+  [[ "$code" == "404" ]] || fail "handle close after unmount should return 404, got $code with $(cat "$TMP_DIR/handle-close-after-unmount.json")"
+
   stop_server
 }
 

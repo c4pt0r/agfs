@@ -74,7 +74,9 @@ This focused backend gate starts real `agfs-server` processes from temporary
 configs. It asserts exact healthy and degraded readiness semantics, verifies
 `/api/v1/mounts` includes mounted and failed configured mounts, exercises the
 HTTP file API, checks request-body `413` behavior, and smokes mounted MemFS,
-QueueFS, ServerInfoFS, HelloFS, and default DevFS paths.
+QueueFS, ServerInfoFS, HelloFS, and default DevFS paths. It also opens a public
+file handle against the configured MemFS plugin and verifies the handle is
+invalidated after unmount.
 
 Useful environment overrides:
 
