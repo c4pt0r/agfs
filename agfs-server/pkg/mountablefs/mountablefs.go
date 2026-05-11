@@ -1,6 +1,7 @@
 package mountablefs
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -274,6 +275,10 @@ func (mfs *MountableFS) Unmount(path string) error {
 		return fmt.Errorf("no mount at path: %s", path)
 	}
 	mount := val.(*MountPoint)
+
+	if err := mfs.closeHandlesForMount(mount); err != nil {
+		return fmt.Errorf("failed to close open handles for mount %s: %w", path, err)
+	}
 
 	// Shutdown the plugin
 	if err := mount.Plugin.Shutdown(); err != nil {
@@ -1027,6 +1032,9 @@ func (mfs *MountableFS) GetStream(path string) (interface{}, error) {
 // OpenHandle opens a file and returns a handle for stateful operations
 // This delegates to the underlying filesystem if it supports HandleFS
 func (mfs *MountableFS) OpenHandle(path string, flags filesystem.OpenFlag, mode uint32) (filesystem.FileHandle, error) {
+	mfs.mu.RLock()
+	defer mfs.mu.RUnlock()
+
 	mount, relPath, found := mfs.findMount(path)
 
 	if !found {
@@ -1059,6 +1067,7 @@ func (mfs *MountableFS) OpenHandle(path string, flags filesystem.OpenFlag, mode 
 	// Return a wrapper that uses the global ID
 	return &globalFileHandle{
 		globalID:    globalID,
+		owner:       mfs,
 		localHandle: localHandle,
 		mountPath:   mount.Path,
 		fullPath:    path,
@@ -1079,6 +1088,7 @@ func (mfs *MountableFS) GetHandle(id int64) (filesystem.FileHandle, error) {
 	// Return a wrapper with the global ID
 	return &globalFileHandle{
 		globalID:    id,
+		owner:       mfs,
 		localHandle: info.localHandle,
 		mountPath:   info.mount.Path,
 		fullPath:    info.mount.Path + info.localHandle.Path(),
@@ -1087,31 +1097,50 @@ func (mfs *MountableFS) GetHandle(id int64) (filesystem.FileHandle, error) {
 
 // CloseHandle closes a handle by its ID
 func (mfs *MountableFS) CloseHandle(id int64) error {
-	// Look up the handle info using the global ID
-	mfs.handleInfosMu.RLock()
+	mfs.handleInfosMu.Lock()
 	info, found := mfs.handleInfos[id]
-	mfs.handleInfosMu.RUnlock()
-
 	if !found {
+		mfs.handleInfosMu.Unlock()
 		return filesystem.ErrNotFound
 	}
+	delete(mfs.handleInfos, id)
+	mfs.handleInfosMu.Unlock()
 
-	// Close the underlying local handle
-	err := info.localHandle.Close()
-	if err == nil {
-		// Remove from mapping
-		mfs.handleInfosMu.Lock()
-		delete(mfs.handleInfos, id)
-		mfs.handleInfosMu.Unlock()
+	return info.localHandle.Close()
+}
+
+func (mfs *MountableFS) closeHandlesForMount(mount *MountPoint) error {
+	type handleToClose struct {
+		id     int64
+		handle filesystem.FileHandle
 	}
 
-	return err
+	var handles []handleToClose
+
+	mfs.handleInfosMu.Lock()
+	for id, info := range mfs.handleInfos {
+		if info.mount == mount {
+			handles = append(handles, handleToClose{id: id, handle: info.localHandle})
+			delete(mfs.handleInfos, id)
+		}
+	}
+	mfs.handleInfosMu.Unlock()
+
+	errs := make([]error, 0)
+	for _, item := range handles {
+		if err := item.handle.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close handle %d: %w", item.id, err))
+		}
+	}
+
+	return errors.Join(errs...)
 }
 
 // globalFileHandle wraps a local file handle with a globally unique ID
 // This prevents handle ID conflicts when multiple plugin instances are mounted
 type globalFileHandle struct {
 	globalID    int64                 // Globally unique ID assigned by MountableFS
+	owner       *MountableFS          // Registry that owns the global handle ID
 	localHandle filesystem.FileHandle // Underlying handle from the plugin
 	mountPath   string                // Mount path for this handle
 	fullPath    string                // Full path including mount point
@@ -1159,6 +1188,13 @@ func (h *globalFileHandle) Sync() error {
 
 // Close delegates to the underlying handle
 func (h *globalFileHandle) Close() error {
+	if h.owner != nil {
+		err := h.owner.CloseHandle(h.globalID)
+		if errors.Is(err, filesystem.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
 	return h.localHandle.Close()
 }
 

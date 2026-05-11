@@ -1,6 +1,7 @@
 package mountablefs
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/c4pt0r/agfs/agfs-server/pkg/filesystem"
@@ -236,5 +237,103 @@ func TestMultipleHandlesSameFile(t *testing.T) {
 		if h.Path() != "/fs/shared.txt" {
 			t.Errorf("Handle %d has wrong path: %s", i, h.Path())
 		}
+	}
+}
+
+func TestUnmountInvalidatesOpenHandles(t *testing.T) {
+	mfs := NewMountableFS(api.PoolConfig{})
+
+	plugin1 := memfs.NewMemFSPlugin()
+	if err := plugin1.Initialize(map[string]interface{}{}); err != nil {
+		t.Fatalf("Failed to initialize plugin: %v", err)
+	}
+	if err := mfs.Mount("/fs", plugin1); err != nil {
+		t.Fatalf("Failed to mount fs: %v", err)
+	}
+	if _, err := mfs.Write("/fs/open.txt", []byte("before unmount"), 0, filesystem.WriteFlagCreate); err != nil {
+		t.Fatalf("Failed to seed file: %v", err)
+	}
+
+	handle, err := mfs.OpenHandle("/fs/open.txt", filesystem.O_RDWR, 0644)
+	if err != nil {
+		t.Fatalf("Failed to open handle: %v", err)
+	}
+	handleID := handle.ID()
+
+	if _, err := mfs.GetHandle(handleID); err != nil {
+		t.Fatalf("Expected open handle to be registered before unmount: %v", err)
+	}
+
+	if err := mfs.Unmount("/fs"); err != nil {
+		t.Fatalf("Failed to unmount fs: %v", err)
+	}
+
+	if _, err := mfs.GetHandle(handleID); !errors.Is(err, filesystem.ErrNotFound) {
+		t.Fatalf("Expected unmounted handle to be removed from registry, got %v", err)
+	}
+	if err := mfs.CloseHandle(handleID); !errors.Is(err, filesystem.ErrNotFound) {
+		t.Fatalf("Expected closing invalidated handle to return not found, got %v", err)
+	}
+	if _, err := handle.Read(make([]byte, 1)); err == nil {
+		t.Fatalf("Expected pre-unmount handle object to be closed")
+	}
+	if _, err := handle.Write([]byte("x")); err == nil {
+		t.Fatalf("Expected pre-unmount handle object to reject writes after unmount")
+	}
+}
+
+func TestUnmountOnlyInvalidatesHandlesForThatMount(t *testing.T) {
+	mfs := NewMountableFS(api.PoolConfig{})
+
+	plugin1 := memfs.NewMemFSPlugin()
+	if err := plugin1.Initialize(map[string]interface{}{}); err != nil {
+		t.Fatalf("Failed to initialize plugin1: %v", err)
+	}
+	plugin2 := memfs.NewMemFSPlugin()
+	if err := plugin2.Initialize(map[string]interface{}{}); err != nil {
+		t.Fatalf("Failed to initialize plugin2: %v", err)
+	}
+
+	if err := mfs.Mount("/fs1", plugin1); err != nil {
+		t.Fatalf("Failed to mount fs1: %v", err)
+	}
+	if err := mfs.Mount("/fs2", plugin2); err != nil {
+		t.Fatalf("Failed to mount fs2: %v", err)
+	}
+	if _, err := mfs.Write("/fs1/open.txt", []byte("from fs1"), 0, filesystem.WriteFlagCreate); err != nil {
+		t.Fatalf("Failed to seed fs1 file: %v", err)
+	}
+	if _, err := mfs.Write("/fs2/open.txt", []byte("from fs2"), 0, filesystem.WriteFlagCreate); err != nil {
+		t.Fatalf("Failed to seed fs2 file: %v", err)
+	}
+
+	handle1, err := mfs.OpenHandle("/fs1/open.txt", filesystem.O_RDONLY, 0644)
+	if err != nil {
+		t.Fatalf("Failed to open fs1 handle: %v", err)
+	}
+	handle2, err := mfs.OpenHandle("/fs2/open.txt", filesystem.O_RDONLY, 0644)
+	if err != nil {
+		t.Fatalf("Failed to open fs2 handle: %v", err)
+	}
+	defer handle2.Close()
+
+	if err := mfs.Unmount("/fs1"); err != nil {
+		t.Fatalf("Failed to unmount fs1: %v", err)
+	}
+
+	if _, err := mfs.GetHandle(handle1.ID()); !errors.Is(err, filesystem.ErrNotFound) {
+		t.Fatalf("Expected fs1 handle to be invalidated, got %v", err)
+	}
+	if _, err := mfs.GetHandle(handle2.ID()); err != nil {
+		t.Fatalf("Expected fs2 handle to remain registered, got %v", err)
+	}
+
+	buf := make([]byte, len("from fs2"))
+	n, err := handle2.Read(buf)
+	if err != nil {
+		t.Fatalf("Expected fs2 handle to remain readable after fs1 unmount: %v", err)
+	}
+	if got := string(buf[:n]); got != "from fs2" {
+		t.Fatalf("Expected fs2 handle to read %q, got %q", "from fs2", got)
 	}
 }
