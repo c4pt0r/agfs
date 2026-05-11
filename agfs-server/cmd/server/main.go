@@ -229,6 +229,7 @@ func main() {
 
 	// Create traffic monitor early so it can be injected into plugins during mounting
 	trafficMonitor := handlers.NewTrafficMonitor()
+	mountStatusTracker := handlers.NewMountStatusTracker()
 
 	// Register plugin factories for dynamic mounting
 	for pluginName, factory := range availablePlugins {
@@ -239,8 +240,12 @@ func main() {
 		})
 	}
 
-	// mountPlugin initializes and mounts a plugin asynchronously
+	// mountPlugin initializes and mounts a configured plugin asynchronously.
+	// Readiness is tracked separately so failed mounts are visible even when
+	// they never enter the mount tree.
 	mountPlugin := func(pluginName, instanceName, mountPath string, pluginConfig map[string]interface{}) {
+		mountStatusTracker.Track(pluginName, instanceName, mountPath, pluginConfig)
+
 		// Get plugin factory (try built-in first, then external)
 		factory, ok := availablePlugins[pluginName]
 		var p plugin.ServicePlugin
@@ -249,7 +254,9 @@ func main() {
 			// Try to get external plugin from mfs
 			p = mfs.CreatePlugin(pluginName)
 			if p == nil {
-				log.Warnf("Unknown plugin: %s, skipping instance '%s'", pluginName, instanceName)
+				err := fmt.Errorf("unknown plugin: %s", pluginName)
+				mountStatusTracker.SetFailed(mountPath, err)
+				log.Warnf("%v, skipping instance '%s'", err, instanceName)
 				return
 			}
 		} else {
@@ -282,22 +289,26 @@ func main() {
 
 			// Validate plugin configuration
 			if err := p.Validate(configWithPath); err != nil {
+				mountStatusTracker.SetFailed(mountPath, err)
 				log.Errorf("Failed to validate %s instance '%s': %v", pluginName, instanceName, err)
 				return
 			}
 
 			// Initialize plugin
 			if err := p.Initialize(configWithPath); err != nil {
+				mountStatusTracker.SetFailed(mountPath, err)
 				log.Errorf("Failed to initialize %s instance '%s': %v", pluginName, instanceName, err)
 				return
 			}
 
 			// Mount plugin
 			if err := mfs.Mount(mountPath, p); err != nil {
+				mountStatusTracker.SetFailed(mountPath, err)
 				log.Errorf("Failed to mount %s instance '%s' at %s: %v", pluginName, instanceName, mountPath, err)
 				return
 			}
 
+			mountStatusTracker.SetMounted(mountPath)
 			// Log success
 			log.Infof("%s instance '%s' mounted at %s", pluginName, instanceName, mountPath)
 		}()
@@ -340,13 +351,18 @@ func main() {
 	devfsConfig := map[string]interface{}{
 		"mount_path": "/dev",
 	}
+	mountStatusTracker.Track("devfs", "devfs", "/dev", devfsConfig)
 	if err := devfsPlugin.Validate(devfsConfig); err != nil {
+		mountStatusTracker.SetFailed("/dev", err)
 		log.Errorf("Failed to validate DevFS: %v", err)
 	} else if err := devfsPlugin.Initialize(devfsConfig); err != nil {
+		mountStatusTracker.SetFailed("/dev", err)
 		log.Errorf("Failed to initialize DevFS: %v", err)
 	} else if err := mfs.Mount("/dev", devfsPlugin); err != nil {
+		mountStatusTracker.SetFailed("/dev", err)
 		log.Errorf("Failed to mount DevFS at /dev: %v", err)
 	} else {
+		mountStatusTracker.SetMounted("/dev")
 		log.Info("DevFS mounted successfully at /dev")
 	}
 
@@ -382,8 +398,10 @@ func main() {
 	handler := handlers.NewHandler(mfs, trafficMonitor)
 	handler.SetVersionInfo(Version, GitCommit, BuildTime)
 	handler.SetMaxRequestBodyBytes(cfg.Server.MaxRequestBodyBytes)
+	handler.SetMountStatusTracker(mountStatusTracker)
 	pluginHandler := handlers.NewPluginHandler(mfs)
 	pluginHandler.SetMaxRequestBodyBytes(cfg.Server.MaxRequestBodyBytes)
+	pluginHandler.SetMountStatusTracker(mountStatusTracker)
 
 	// Setup routes
 	mux := http.NewServeMux()

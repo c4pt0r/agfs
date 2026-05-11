@@ -31,6 +31,7 @@ type Handler struct {
 	buildTime           string
 	trafficMonitor      *TrafficMonitor
 	maxRequestBodyBytes int64
+	mountStatusTracker  *MountStatusTracker
 }
 
 // NewHandler creates a new Handler
@@ -50,6 +51,12 @@ func (h *Handler) SetVersionInfo(version, gitCommit, buildTime string) {
 	h.version = version
 	h.gitCommit = gitCommit
 	h.buildTime = buildTime
+}
+
+// SetMountStatusTracker connects health/readiness responses to configured
+// mount lifecycle state.
+func (h *Handler) SetMountStatusTracker(tracker *MountStatusTracker) {
+	h.mountStatusTracker = tracker
 }
 
 // ErrorResponse represents an error response
@@ -562,21 +569,58 @@ func (h *Handler) Capabilities(w http.ResponseWriter, r *http.Request) {
 
 // HealthResponse represents the health check response
 type HealthResponse struct {
-	Status    string `json:"status"`
-	Version   string `json:"version"`
-	GitCommit string `json:"gitCommit"`
-	BuildTime string `json:"buildTime"`
+	Status    string       `json:"status"`
+	Version   string       `json:"version"`
+	GitCommit string       `json:"gitCommit"`
+	BuildTime string       `json:"buildTime"`
+	Ready     bool         `json:"ready"`
+	Degraded  bool         `json:"degraded"`
+	Mounts    MountSummary `json:"mounts"`
 }
 
 // Health handles GET /health
 func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, h.healthResponse())
+}
+
+// Ready handles GET /ready and returns 503 until configured mounts are fully ready.
+func (h *Handler) Ready(w http.ResponseWriter, r *http.Request) {
+	response := h.healthResponse()
+	status := http.StatusOK
+	if !response.Ready || response.Degraded {
+		status = http.StatusServiceUnavailable
+	}
+	writeJSON(w, status, response)
+}
+
+func (h *Handler) healthResponse() HealthResponse {
+	ready := true
+	degraded := false
+	mounts := MountSummary{}
+	if h.mountStatusTracker != nil {
+		ready = h.mountStatusTracker.Ready()
+		degraded = h.mountStatusTracker.Degraded()
+		mounts = h.mountStatusTracker.Summary()
+	}
+
+	status := "healthy"
+	if degraded {
+		status = "degraded"
+	} else if !ready {
+		status = "starting"
+	}
+
 	response := HealthResponse{
 		Status:    "healthy",
 		Version:   h.version,
 		GitCommit: h.gitCommit,
 		BuildTime: h.buildTime,
+		Ready:     ready,
+		Degraded:  degraded,
+		Mounts:    mounts,
 	}
-	writeJSON(w, http.StatusOK, response)
+	response.Status = status
+	return response
 }
 
 // Touch handles POST /touch?path=<path>
@@ -742,6 +786,13 @@ func (h *Handler) Truncate(w http.ResponseWriter, r *http.Request) {
 // SetupRoutes sets up all HTTP routes with /api/v1 prefix
 func (h *Handler) SetupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/health", h.Health)
+	mux.HandleFunc("/api/v1/ready", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		h.Ready(w, r)
+	})
 	mux.HandleFunc("/api/v1/version", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")

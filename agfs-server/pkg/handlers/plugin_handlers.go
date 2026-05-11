@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/c4pt0r/agfs/agfs-server/pkg/filesystem"
@@ -21,6 +22,7 @@ import (
 type PluginHandler struct {
 	mfs                 *mountablefs.MountableFS
 	maxRequestBodyBytes int64
+	mountStatusTracker  *MountStatusTracker
 }
 
 // NewPluginHandler creates a new plugin handler
@@ -31,10 +33,19 @@ func NewPluginHandler(mfs *mountablefs.MountableFS) *PluginHandler {
 	}
 }
 
+// SetMountStatusTracker connects mount listing responses to configured mount
+// lifecycle state, including mounts that are pending or failed.
+func (ph *PluginHandler) SetMountStatusTracker(tracker *MountStatusTracker) {
+	ph.mountStatusTracker = tracker
+}
+
 // MountInfo represents information about a mounted plugin
 type MountInfo struct {
 	Path       string                 `json:"path"`
 	PluginName string                 `json:"pluginName"`
+	Instance   string                 `json:"instance,omitempty"`
+	Status     string                 `json:"status,omitempty"`
+	Error      string                 `json:"error,omitempty"`
 	Config     map[string]interface{} `json:"config,omitempty"`
 }
 
@@ -48,13 +59,46 @@ func (ph *PluginHandler) ListMounts(w http.ResponseWriter, r *http.Request) {
 	mounts := ph.mfs.GetMounts()
 
 	var mountInfos []MountInfo
+	statusByPath := make(map[string]MountStatusInfo)
+	if ph.mountStatusTracker != nil {
+		for _, status := range ph.mountStatusTracker.Statuses() {
+			statusByPath[status.Path] = status
+			if status.Status != MountStatusMounted {
+				mountInfos = append(mountInfos, MountInfo{
+					Path:       status.Path,
+					PluginName: status.PluginName,
+					Instance:   status.Instance,
+					Status:     status.Status,
+					Error:      status.Error,
+					Config:     status.Config,
+				})
+			}
+		}
+	}
+
 	for _, mount := range mounts {
-		mountInfos = append(mountInfos, MountInfo{
+		status := MountStatusInfo{
 			Path:       mount.Path,
 			PluginName: mount.Plugin.Name(),
+			Status:     MountStatusMounted,
 			Config:     mount.Config,
+		}
+		if tracked, ok := statusByPath[mount.Path]; ok {
+			status = tracked
+			status.Status = MountStatusMounted
+		}
+		mountInfos = append(mountInfos, MountInfo{
+			Path:       status.Path,
+			PluginName: status.PluginName,
+			Instance:   status.Instance,
+			Status:     status.Status,
+			Error:      status.Error,
+			Config:     status.Config,
 		})
 	}
+	sort.Slice(mountInfos, func(i, j int) bool {
+		return mountInfos[i].Path < mountInfos[j].Path
+	})
 
 	writeJSON(w, http.StatusOK, ListMountsResponse{Mounts: mountInfos})
 }
