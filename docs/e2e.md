@@ -30,6 +30,38 @@ Useful environment overrides:
 - `AGFS_E2E_SKIP_WEBAPP=1` skips the npm/webapp build smoke when Node/npm is unavailable. Do not use this in CI unless a separate webapp e2e job covers the same path.
 - `AGFS_E2E_LOG_FILE=/tmp/agfs-e2e.log` changes the server log path.
 
+## Shell / SDK / Pipeline / Client-Lifecycle Harness
+
+Run from the repository root:
+
+```bash
+scripts/e2e/run-shell-sdk-e2e.sh
+```
+
+This lane gate starts a single `agfs-server` on `127.0.0.1:18084` and runs the
+opt-in `@pytest.mark.e2e` tests from both `agfs-shell/tests/` and
+`agfs-sdk/python/tests/` against it. Covers:
+
+- `agfs-shell` pipeline correctness + readline performance
+  (`tests/test_streaming_pipeline_e2e.py` — landed via task #20).
+- `agfs-shell` happy/error paths: basic command, multi-stage pipeline,
+  unknown-command exit code (`tests/test_shell_happy_path_e2e.py`).
+- Python SDK lifecycle + post-close guard
+  (`tests/test_lifecycle_e2e.py` — landed via task #21).
+- Python SDK `ls` / `write` / `read` / `stat` happy path + a 404-equivalent
+  error path (`tests/test_sdk_happy_path_e2e.py`).
+
+The fixtures honour `AGFS_E2E_BASE_URL`, so this lane runs one server for
+every test in the run — the same fixtures still boot their own server when
+invoked directly via `AGFS_RUN_E2E=1 pytest`, so individual files remain
+runnable for fast iteration.
+
+Useful environment overrides:
+
+- `AGFS_SHELL_SDK_E2E_PORT=18085` changes the lane server port.
+- `AGFS_SHELL_SDK_E2E_HOST=127.0.0.1` changes the bind host.
+- `AGFS_SHELL_SDK_E2E_LOG=/tmp/agfs-shell-sdk-e2e.log` changes the server log path.
+
 ## Backend/Server Harness
 
 Run from the repository root:

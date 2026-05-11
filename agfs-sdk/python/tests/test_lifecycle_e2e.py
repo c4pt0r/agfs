@@ -80,7 +80,24 @@ def live_agfs_server():
     Mirrors ``scripts/e2e/run-core-e2e.sh``'s server boot but in-process
     so the test can drive its own AGFSClient lifecycle without going
     through the shell.
+
+    Honours ``AGFS_E2E_BASE_URL`` so the shell/SDK lane harness
+    (task #26) can run a single server for the whole lane. Without
+    the env var, each test boots its own per-fixture server — slower
+    but self-contained.
     """
+    shared = os.getenv("AGFS_E2E_BASE_URL")
+    if shared:
+        # The shared server is presumed already healthy because the
+        # harness waits on /health before invoking pytest. We can
+        # still get a clear skip if it's misconfigured.
+        try:
+            requests.get(f"{shared}/api/v1/health", timeout=2).raise_for_status()
+        except requests.exceptions.RequestException:
+            pytest.skip(f"AGFS_E2E_BASE_URL={shared} is not reachable")
+        yield shared
+        return
+
     _require_command("go")
     port = _free_port()
     base_url = f"http://127.0.0.1:{port}"

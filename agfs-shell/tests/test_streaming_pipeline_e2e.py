@@ -78,7 +78,26 @@ def live_agfs_server():
     and read regular files (queuefs is in the default config but uses
     enqueue/dequeue semantics, which is the wrong shape for piping a
     multi-line file through ``cat | wc -l``).
+
+    Honours ``AGFS_E2E_BASE_URL`` so the shell/SDK lane harness
+    (task #26) can run a single server for the whole lane. Without
+    the env var, each test boots its own per-fixture server.
     """
+    shared = os.getenv("AGFS_E2E_BASE_URL")
+    if shared:
+        try:
+            r = requests.get(f"{shared}/api/v1/health", timeout=2)
+            r.raise_for_status()
+            requests.post(
+                f"{shared}/api/v1/mount",
+                json={"fstype": "memfs", "path": "/memfs", "config": {}},
+                timeout=10,
+            )
+        except requests.exceptions.RequestException:
+            pytest.skip(f"AGFS_E2E_BASE_URL={shared} is not reachable")
+        yield shared
+        return
+
     _require_command("go")
     port = _free_port()
     base_url = f"http://127.0.0.1:{port}"
@@ -180,9 +199,13 @@ def test_large_pipeline_readline_completes_quickly_end_to_end(live_agfs_server):
 
     start = time.monotonic()
     result = subprocess.run(
+        # ``--frozen`` so the test never mutates ``agfs-shell/uv.lock``
+        # under us — the shared E2E gate must leave tracked files
+        # clean.
         [
             "uv",
             "run",
+            "--frozen",
             "agfs-shell",
             "-c",
             f"cat {path} | head -n {line_count} | wc -l",
@@ -255,7 +278,9 @@ def test_pipeline_preserves_content_through_streaming_buffer_end_to_end(live_agf
     # agfs-shell's ``head`` builtin only parses the ``-n N`` flag — the
     # POSIX shorthand ``head -3`` isn't recognized. Pass the long form.
     result = subprocess.run(
-        ["uv", "run", "agfs-shell", "-c", f"cat {path} | head -n 3"],
+        # ``--frozen`` — see the perf test above. No tracked-file
+        # mutation by the E2E gate.
+        ["uv", "run", "--frozen", "agfs-shell", "-c", f"cat {path} | head -n 3"],
         cwd=SHELL_ROOT,
         env=env,
         text=True,

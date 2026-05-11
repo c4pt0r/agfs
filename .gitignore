@@ -41,3 +41,7 @@ build/
 *.pyc
 __pycache__/
 .idea
+
+# E2E harness runtime artifacts (server logs written by
+# scripts/e2e/run-*.sh; overridable via the AGFS_*_LOG env vars)
+/.e2e-*.log
