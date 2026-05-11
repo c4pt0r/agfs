@@ -3,6 +3,7 @@
 server:
   address: ":8080"
   log_level: info # Options: debug, info, warn, error
+  max_request_body_bytes: 67108864 # Max write/JSON request body size (64 MiB)
 
 plugins:
   serverinfofs:

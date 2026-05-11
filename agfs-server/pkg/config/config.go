@@ -16,34 +16,35 @@ type Config struct {
 
 // ServerConfig contains server-level configuration
 type ServerConfig struct {
-	Address  string `yaml:"address"`
-	LogLevel string `yaml:"log_level"`
+	Address             string `yaml:"address"`
+	LogLevel            string `yaml:"log_level"`
+	MaxRequestBodyBytes int64  `yaml:"max_request_body_bytes"`
 }
 
 // ExternalPluginsConfig contains configuration for external plugins
 type ExternalPluginsConfig struct {
-	Enabled       bool              `yaml:"enabled"`
-	PluginDir     string            `yaml:"plugin_dir"`
-	AutoLoad      bool              `yaml:"auto_load"`
-	PluginPaths   []string          `yaml:"plugin_paths"`
-	WASIMountPath string            `yaml:"wasi_mount_path"` // Directory to mount for WASI filesystem access
-	WASM          WASMPluginConfig  `yaml:"wasm"`            // WASM plugin specific configuration
+	Enabled       bool             `yaml:"enabled"`
+	PluginDir     string           `yaml:"plugin_dir"`
+	AutoLoad      bool             `yaml:"auto_load"`
+	PluginPaths   []string         `yaml:"plugin_paths"`
+	WASIMountPath string           `yaml:"wasi_mount_path"` // Directory to mount for WASI filesystem access
+	WASM          WASMPluginConfig `yaml:"wasm"`            // WASM plugin specific configuration
 }
 
 // WASMPluginConfig contains configuration for WASM plugins
 type WASMPluginConfig struct {
-	InstancePoolSize     int `yaml:"instance_pool_size"`      // Maximum concurrent instances per plugin (default: 10)
-	InstanceMaxLifetime  int `yaml:"instance_max_lifetime"`   // Maximum instance lifetime in seconds (0 = unlimited)
-	InstanceMaxRequests  int `yaml:"instance_max_requests"`   // Maximum requests per instance (0 = unlimited)
-	HealthCheckInterval  int `yaml:"health_check_interval"`   // Health check interval in seconds (0 = disabled)
+	InstancePoolSize     int  `yaml:"instance_pool_size"`     // Maximum concurrent instances per plugin (default: 10)
+	InstanceMaxLifetime  int  `yaml:"instance_max_lifetime"`  // Maximum instance lifetime in seconds (0 = unlimited)
+	InstanceMaxRequests  int  `yaml:"instance_max_requests"`  // Maximum requests per instance (0 = unlimited)
+	HealthCheckInterval  int  `yaml:"health_check_interval"`  // Health check interval in seconds (0 = disabled)
 	EnablePoolStatistics bool `yaml:"enable_pool_statistics"` // Enable pool statistics collection
 }
 
 // PluginConfig can be either a single plugin or an array of plugin instances
 type PluginConfig struct {
 	// For single instance plugins
-	Enabled bool   `yaml:"enabled"`
-	Path    string `yaml:"path"`
+	Enabled bool                   `yaml:"enabled"`
+	Path    string                 `yaml:"path"`
 	Config  map[string]interface{} `yaml:"config"`
 
 	// For multi-instance plugins (array format)

@@ -3,7 +3,6 @@ package handlers
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,12 +19,16 @@ import (
 
 // PluginHandler handles plugin management operations
 type PluginHandler struct {
-	mfs *mountablefs.MountableFS
+	mfs                 *mountablefs.MountableFS
+	maxRequestBodyBytes int64
 }
 
 // NewPluginHandler creates a new plugin handler
 func NewPluginHandler(mfs *mountablefs.MountableFS) *PluginHandler {
-	return &PluginHandler{mfs: mfs}
+	return &PluginHandler{
+		mfs:                 mfs,
+		maxRequestBodyBytes: DefaultMaxRequestBodyBytes,
+	}
 }
 
 // MountInfo represents information about a mounted plugin
@@ -64,8 +67,8 @@ type UnmountRequest struct {
 // Unmount handles POST /unmount
 func (ph *PluginHandler) Unmount(w http.ResponseWriter, r *http.Request) {
 	var req UnmountRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := decodeLimitedJSON(w, r, ph.maxRequestBodyBytes, &req); err != nil {
+		writeRequestBodyError(w, err, ph.maxRequestBodyBytes, "invalid request body")
 		return
 	}
 
@@ -92,8 +95,8 @@ type MountRequest struct {
 // Mount handles POST /mount
 func (ph *PluginHandler) Mount(w http.ResponseWriter, r *http.Request) {
 	var req MountRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := decodeLimitedJSON(w, r, ph.maxRequestBodyBytes, &req); err != nil {
+		writeRequestBodyError(w, err, ph.maxRequestBodyBytes, "invalid request body")
 		return
 	}
 
@@ -128,7 +131,6 @@ func (ph *PluginHandler) Mount(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, SuccessResponse{Message: "plugin mounted"})
 }
-
 
 // LoadPluginRequest represents a request to load an external plugin
 type LoadPluginRequest struct {
@@ -249,8 +251,8 @@ func (ph *PluginHandler) readPluginFromAGFS(agfsPath string) (string, error) {
 // LoadPlugin handles POST /plugins/load
 func (ph *PluginHandler) LoadPlugin(w http.ResponseWriter, r *http.Request) {
 	var req LoadPluginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := decodeLimitedJSON(w, r, ph.maxRequestBodyBytes, &req); err != nil {
+		writeRequestBodyError(w, err, ph.maxRequestBodyBytes, "invalid request body")
 		return
 	}
 
@@ -317,8 +319,8 @@ type UnloadPluginRequest struct {
 // UnloadPlugin handles POST /plugins/unload
 func (ph *PluginHandler) UnloadPlugin(w http.ResponseWriter, r *http.Request) {
 	var req UnloadPluginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := decodeLimitedJSON(w, r, ph.maxRequestBodyBytes, &req); err != nil {
+		writeRequestBodyError(w, err, ph.maxRequestBodyBytes, "invalid request body")
 		return
 	}
 

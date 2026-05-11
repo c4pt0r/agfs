@@ -70,6 +70,7 @@ const sampleConfig = `# AGFS Server Configuration File
 server:
   address: ":8080"          # Server listen address
   log_level: "info"         # Log level: debug, info, warn, error
+  max_request_body_bytes: 67108864  # Max write/JSON request body size (64 MiB)
 
 # Plugin configurations
 plugins:
@@ -380,7 +381,9 @@ func main() {
 	// Create handlers
 	handler := handlers.NewHandler(mfs, trafficMonitor)
 	handler.SetVersionInfo(Version, GitCommit, BuildTime)
+	handler.SetMaxRequestBodyBytes(cfg.Server.MaxRequestBodyBytes)
 	pluginHandler := handlers.NewPluginHandler(mfs)
+	pluginHandler.SetMaxRequestBodyBytes(cfg.Server.MaxRequestBodyBytes)
 
 	// Setup routes
 	mux := http.NewServeMux()

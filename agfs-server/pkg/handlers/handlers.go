@@ -25,21 +25,23 @@ import (
 
 // Handler wraps the FileSystem and provides HTTP handlers
 type Handler struct {
-	fs             filesystem.FileSystem
-	version        string
-	gitCommit      string
-	buildTime      string
-	trafficMonitor *TrafficMonitor
+	fs                  filesystem.FileSystem
+	version             string
+	gitCommit           string
+	buildTime           string
+	trafficMonitor      *TrafficMonitor
+	maxRequestBodyBytes int64
 }
 
 // NewHandler creates a new Handler
 func NewHandler(fs filesystem.FileSystem, trafficMonitor *TrafficMonitor) *Handler {
 	return &Handler{
-		fs:             fs,
-		version:        "dev",
-		gitCommit:      "unknown",
-		buildTime:      "unknown",
-		trafficMonitor: trafficMonitor,
+		fs:                  fs,
+		version:             "dev",
+		gitCommit:           "unknown",
+		buildTime:           "unknown",
+		trafficMonitor:      trafficMonitor,
+		maxRequestBodyBytes: DefaultMaxRequestBodyBytes,
 	}
 }
 
@@ -262,9 +264,9 @@ func (h *Handler) WriteFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data, err := io.ReadAll(r.Body)
+	data, err := readLimitedRequestBody(w, r, h.maxRequestBodyBytes)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "failed to read request body")
+		writeRequestBodyError(w, err, h.maxRequestBodyBytes, "failed to read request body")
 		return
 	}
 
@@ -387,8 +389,8 @@ func (h *Handler) Rename(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req RenameRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := decodeLimitedJSON(w, r, h.maxRequestBodyBytes, &req); err != nil {
+		writeRequestBodyError(w, err, h.maxRequestBodyBytes, "invalid request body")
 		return
 	}
 
@@ -415,8 +417,8 @@ func (h *Handler) Chmod(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req ChmodRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := decodeLimitedJSON(w, r, h.maxRequestBodyBytes, &req); err != nil {
+		writeRequestBodyError(w, err, h.maxRequestBodyBytes, "invalid request body")
 		return
 	}
 
@@ -432,8 +434,8 @@ func (h *Handler) Chmod(w http.ResponseWriter, r *http.Request) {
 // Digest handles POST /digest
 func (h *Handler) Digest(w http.ResponseWriter, r *http.Request) {
 	var req DigestRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+	if err := decodeLimitedJSON(w, r, h.maxRequestBodyBytes, &req); err != nil {
+		writeRequestBodyError(w, err, h.maxRequestBodyBytes, "invalid request body: "+err.Error())
 		return
 	}
 
@@ -645,8 +647,8 @@ func (h *Handler) Symlink(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req SymlinkRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+	if err := decodeLimitedJSON(w, r, h.maxRequestBodyBytes, &req); err != nil {
+		writeRequestBodyError(w, err, h.maxRequestBodyBytes, "invalid request body")
 		return
 	}
 
@@ -779,8 +781,8 @@ func (h *Handler) SetupRoutes(mux *http.ServeMux) {
 			var req struct {
 				Data string `json:"data"`
 			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				writeError(w, http.StatusBadRequest, "invalid JSON body")
+			if err := decodeLimitedJSON(w, r, h.maxRequestBodyBytes, &req); err != nil {
+				writeRequestBodyError(w, err, h.maxRequestBodyBytes, "invalid JSON body")
 				return
 			}
 			// Get path from query parameter
@@ -1037,9 +1039,9 @@ type GrepRequest struct {
 
 // GrepMatch represents a single match result
 type GrepMatch struct {
-	File     string                 `json:"file"`              // File path
-	Line     int                    `json:"line"`              // Line number (1-indexed)
-	Content  string                 `json:"content"`           // Matched line content
+	File     string                 `json:"file"`               // File path
+	Line     int                    `json:"line"`               // Line number (1-indexed)
+	Content  string                 `json:"content"`            // Matched line content
 	Metadata map[string]interface{} `json:"metadata,omitempty"` // Optional metadata (e.g., score, distance for vector search)
 }
 
@@ -1052,8 +1054,8 @@ type GrepResponse struct {
 // Grep searches for a pattern in files
 func (h *Handler) Grep(w http.ResponseWriter, r *http.Request) {
 	var req GrepRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+	if err := decodeLimitedJSON(w, r, h.maxRequestBodyBytes, &req); err != nil {
+		writeRequestBodyError(w, err, h.maxRequestBodyBytes, "invalid request body: "+err.Error())
 		return
 	}
 
