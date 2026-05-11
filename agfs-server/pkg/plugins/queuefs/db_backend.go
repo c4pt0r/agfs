@@ -31,6 +31,11 @@ type DBBackend interface {
 	// GetDequeueQuery returns the SQL used to claim the next queue message.
 	GetDequeueQuery(tableName string) string
 
+	// GetAtomicDequeueQuery returns SQL that atomically marks the next message
+	// deleted and returns its data. Backends that cannot express this in one
+	// statement return ok=false and use GetDequeueQuery inside a transaction.
+	GetAtomicDequeueQuery(tableName string) (query string, ok bool)
+
 	// GetDriverName returns the driver name
 	GetDriverName() string
 }
@@ -49,7 +54,7 @@ func (b *SQLiteDBBackend) GetDriverName() string {
 func (b *SQLiteDBBackend) Open(cfg map[string]interface{}) (*sql.DB, error) {
 	dbPath := config.GetStringConfig(cfg, "db_path", "queue.db")
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite3", sqliteDSNWithDefaultBusyTimeout(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open SQLite database: %w", err)
 	}
@@ -59,8 +64,19 @@ func (b *SQLiteDBBackend) Open(cfg map[string]interface{}) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
 	}
-
 	return db, nil
+}
+
+func sqliteDSNWithDefaultBusyTimeout(dsn string) string {
+	if strings.Contains(dsn, "_busy_timeout=") || strings.Contains(dsn, "busy_timeout=") {
+		return dsn
+	}
+
+	separator := "?"
+	if strings.Contains(dsn, "?") {
+		separator = "&"
+	}
+	return dsn + separator + "_busy_timeout=5000"
 }
 
 func (b *SQLiteDBBackend) GetInitSQL() []string {
@@ -95,6 +111,18 @@ func (b *SQLiteDBBackend) GetRegisterQueueSQL() string {
 
 func (b *SQLiteDBBackend) GetDequeueQuery(tableName string) string {
 	return fmt.Sprintf("SELECT id, data FROM %s WHERE deleted = 0 ORDER BY id LIMIT 1", tableName)
+}
+
+func (b *SQLiteDBBackend) GetAtomicDequeueQuery(tableName string) (string, bool) {
+	return fmt.Sprintf(`UPDATE %s
+		SET deleted = 1, deleted_at = CURRENT_TIMESTAMP
+		WHERE id = (
+			SELECT id FROM %s
+			WHERE deleted = 0
+			ORDER BY id
+			LIMIT 1
+		)
+		RETURNING data`, tableName, tableName), true
 }
 
 // TiDBDBBackend implements DBBackend for TiDB
@@ -252,6 +280,10 @@ func (b *TiDBDBBackend) GetRegisterQueueSQL() string {
 
 func (b *TiDBDBBackend) GetDequeueQuery(tableName string) string {
 	return fmt.Sprintf("SELECT id, data FROM %s WHERE deleted = 0 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED", tableName)
+}
+
+func (b *TiDBDBBackend) GetAtomicDequeueQuery(tableName string) (string, bool) {
+	return "", false
 }
 
 // Helper functions
