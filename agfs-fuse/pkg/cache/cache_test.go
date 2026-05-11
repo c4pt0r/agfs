@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -151,4 +152,153 @@ func TestCacheConcurrency(t *testing.T) {
 	<-done
 
 	// If we got here without panic, concurrency is safe
+}
+
+// TestCacheLRUEviction verifies that bounding the cache via WithMaxEntries
+// evicts the least-recently-used entry on overflow and that a Get on an
+// older entry moves it back to the front of the eviction order.
+func TestCacheLRUEviction(t *testing.T) {
+	c := NewCache(1*time.Second, WithMaxEntries(2))
+	defer c.Stop()
+
+	c.Set("a", 1)
+	c.Set("b", 2)
+
+	// Touching "a" should make "b" the LRU.
+	if _, ok := c.Get("a"); !ok {
+		t.Fatal("expected a to be present")
+	}
+
+	// "c" forces eviction; "b" was LRU after touching "a".
+	c.Set("c", 3)
+
+	if _, ok := c.Get("b"); ok {
+		t.Error("expected b to be evicted as LRU")
+	}
+	if _, ok := c.Get("a"); !ok {
+		t.Error("expected a to survive eviction")
+	}
+	if _, ok := c.Get("c"); !ok {
+		t.Error("expected c to be present")
+	}
+	if got, want := c.Len(), 2; got != want {
+		t.Errorf("Len() = %d, want %d", got, want)
+	}
+}
+
+// TestCacheLRUDoesNotEvictWithoutLimit confirms the legacy unbounded
+// constructor path: callers who skip WithMaxEntries still see no
+// eviction (only TTL expiry).
+func TestCacheLRUDoesNotEvictWithoutLimit(t *testing.T) {
+	c := NewCache(10 * time.Second)
+	defer c.Stop()
+
+	for i := 0; i < 100; i++ {
+		c.Set(string(rune('a'+i%26))+string(rune('0'+i/26)), i)
+	}
+	if got, want := c.Len(), 100; got != want {
+		t.Errorf("unbounded cache Len() = %d, want %d", got, want)
+	}
+}
+
+// TestCacheUpdateInPlaceDoesNotEvict checks that updating an existing
+// key does not count as a new insertion for capacity purposes — the
+// fixed-size cache should never evict a still-present key just because
+// it was rewritten.
+func TestCacheUpdateInPlaceDoesNotEvict(t *testing.T) {
+	c := NewCache(1*time.Second, WithMaxEntries(2))
+	defer c.Stop()
+
+	c.Set("a", 1)
+	c.Set("b", 2)
+	c.Set("a", 99) // update in place, not a new entry
+
+	if got, ok := c.Get("a"); !ok || got != 99 {
+		t.Errorf("Get(a) = (%v, %v), want (99, true)", got, ok)
+	}
+	if _, ok := c.Get("b"); !ok {
+		t.Error("b should still be present after a was updated in place")
+	}
+}
+
+// TestCacheStopExitsCleanupGoroutine verifies the deterministic shutdown
+// contract: after Stop, Done() closes promptly. Avoids
+// runtime.NumGoroutine polling (timing-sensitive).
+func TestCacheStopExitsCleanupGoroutine(t *testing.T) {
+	c := NewCache(50 * time.Millisecond)
+
+	c.Stop()
+
+	select {
+	case <-c.Done():
+		// success — cleanup goroutine acknowledged the stop
+	case <-time.After(2 * time.Second):
+		t.Fatal("cleanup goroutine did not exit within 2s of Stop()")
+	}
+}
+
+// TestCacheStopIdempotent guarantees Stop can be called many times — and
+// from multiple goroutines — without panic. Critical because containing
+// structs (FUSE filesystem, etc.) may call Close multiple times during
+// shutdown ordering.
+func TestCacheStopIdempotent(t *testing.T) {
+	c := NewCache(50 * time.Millisecond)
+
+	const N = 8
+	var wg sync.WaitGroup
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.Stop()
+		}()
+	}
+	wg.Wait()
+
+	select {
+	case <-c.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Done did not close after concurrent Stop() calls")
+	}
+}
+
+// TestCacheExpiredEntryReturnsNotFound verifies an expired-but-not-swept
+// entry returns (nil, false) from Get and is pruned immediately — this
+// matters because the sweeper runs on a ticker, so a Get between ticks
+// must still observe the expiration boundary.
+func TestCacheExpiredEntryReturnsNotFound(t *testing.T) {
+	c := NewCache(10 * time.Millisecond)
+	defer c.Stop()
+
+	c.Set("k", "v")
+	time.Sleep(50 * time.Millisecond)
+
+	if _, ok := c.Get("k"); ok {
+		t.Error("expected expired entry to be reported as not found")
+	}
+	if got := c.Len(); got != 0 {
+		t.Errorf("expected expired entry to be pruned, Len() = %d", got)
+	}
+}
+
+// TestMetadataCacheStop / TestDirectoryCacheStop verify that the wrapper
+// types thread Stop through to the underlying Cache.
+func TestMetadataCacheStop(t *testing.T) {
+	mc := NewMetadataCache(50 * time.Millisecond)
+	mc.Stop()
+	select {
+	case <-mc.cache.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("metadata cache cleanup goroutine did not exit")
+	}
+}
+
+func TestDirectoryCacheStop(t *testing.T) {
+	dc := NewDirectoryCache(50 * time.Millisecond)
+	dc.Stop()
+	select {
+	case <-dc.cache.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("directory cache cleanup goroutine did not exit")
+	}
 }

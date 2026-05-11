@@ -30,7 +30,25 @@ type Config struct {
 	ServerURL string
 	CacheTTL  time.Duration
 	Debug     bool
+
+	// MetaCacheMaxEntries caps the metadata cache size. <= 0 falls back to
+	// defaultMetaCacheMaxEntries; an unbounded cache is not exposed via this
+	// constructor to prevent OOM on long-lived mounts. Override only with
+	// good reason.
+	MetaCacheMaxEntries int
+
+	// DirCacheMaxEntries caps the directory-listing cache size. <= 0 falls
+	// back to defaultDirCacheMaxEntries.
+	DirCacheMaxEntries int
 }
+
+// Conservative defaults; large enough that interactive workloads almost
+// never hit the cap, small enough that the absolute memory footprint of
+// the metadata caches stays bounded for long-lived mounts.
+const (
+	defaultMetaCacheMaxEntries = 50_000
+	defaultDirCacheMaxEntries  = 5_000
+)
 
 // NewAGFSFS creates a new AGFS FUSE filesystem
 func NewAGFSFS(config Config) *AGFSFS {
@@ -40,11 +58,20 @@ func NewAGFSFS(config Config) *AGFSFS {
 	}
 	client := agfs.NewClientWithHTTPClient(config.ServerURL, httpClient)
 
+	metaMax := config.MetaCacheMaxEntries
+	if metaMax <= 0 {
+		metaMax = defaultMetaCacheMaxEntries
+	}
+	dirMax := config.DirCacheMaxEntries
+	if dirMax <= 0 {
+		dirMax = defaultDirCacheMaxEntries
+	}
+
 	return &AGFSFS{
 		client:    client,
 		handles:   NewHandleManager(client),
-		metaCache: cache.NewMetadataCache(config.CacheTTL),
-		dirCache:  cache.NewDirectoryCache(config.CacheTTL),
+		metaCache: cache.NewMetadataCache(config.CacheTTL, cache.WithMaxEntries(metaMax)),
+		dirCache:  cache.NewDirectoryCache(config.CacheTTL, cache.WithMaxEntries(dirMax)),
 		cacheTTL:  config.CacheTTL,
 	}
 }
@@ -52,15 +79,17 @@ func NewAGFSFS(config Config) *AGFSFS {
 // Close closes the filesystem and releases resources
 func (root *AGFSFS) Close() error {
 	// Close all open handles
-	if err := root.handles.CloseAll(); err != nil {
-		return err
-	}
+	closeErr := root.handles.CloseAll()
 
-	// Clear caches
+	// Clear caches and stop their cleanup goroutines so the filesystem
+	// shuts down cleanly without leaking goroutines for the rest of the
+	// process lifetime.
 	root.metaCache.Clear()
 	root.dirCache.Clear()
+	root.metaCache.Stop()
+	root.dirCache.Stop()
 
-	return nil
+	return closeErr
 }
 
 // Statfs returns filesystem statistics
