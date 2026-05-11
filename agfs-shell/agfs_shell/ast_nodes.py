@@ -94,8 +94,14 @@ class FunctionDefinition(Statement):
     Examples:
         hello() { echo "Hello $1"; }
         function greet { echo "Hi"; }
+        function add(a, b) { echo $1 $2; }     # bash extension: declared params
+
+    Note: `params` records declared parameter names from the
+    `function NAME(a, b)` form. Call-time argument binding still uses
+    `$1`, `$2`, ... — declared names are recorded for introspection only.
     """
     name: str
+    params: List[str] = field(default_factory=list)
     body: List[Statement] = field(default_factory=list)
 
 

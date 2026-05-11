@@ -1699,7 +1699,32 @@ class Shell:
 
     def execute(self, command_line: str, stdin_data: Optional[bytes] = None, heredoc_data: Optional[bytes] = None) -> int:
         """
-        Execute a command line (possibly with pipelines and redirections)
+        Execute a command line (possibly with pipelines and redirections).
+
+        Public entry point. Delegates to :meth:`_execute_dispatch` and then
+        pins ``$?`` to the returned status so callers — including the test
+        suite — observe bash-like behaviour where ``$?`` reflects the most
+        recent command's exit code. Special internal signals (negative
+        sentinel codes such as ``EXIT_CODE_FOR_LOOP_NEEDED``) are *not*
+        leaked into ``$?``; they're collection signals for the REPL, not
+        real exit statuses.
+
+        Script-mode (:meth:`execute_script_content`) calls this method per
+        command and may also set ``$?`` itself with the same value; the
+        redundant write is harmless and keeps the public boundary
+        self-consistent.
+        """
+        exit_code = self._execute_dispatch(command_line, stdin_data=stdin_data, heredoc_data=heredoc_data)
+        # Only persist real exit codes. Control-flow / collection sentinels
+        # are negative; treating them as $? would corrupt visible state.
+        if isinstance(exit_code, int) and exit_code >= 0:
+            self.env['?'] = str(exit_code)
+        return exit_code
+
+    def _execute_dispatch(self, command_line: str, stdin_data: Optional[bytes] = None, heredoc_data: Optional[bytes] = None) -> int:
+        """
+        Internal dispatch for :meth:`execute`. Same contract, but does not
+        update ``$?``; the public wrapper handles that.
 
         Args:
             command_line: Command string to execute
@@ -1707,7 +1732,7 @@ class Shell:
             heredoc_data: Optional heredoc data (for << redirections)
 
         Returns:
-            Exit code of the pipeline
+            Exit code of the pipeline (or a negative collection signal)
         """
         # Strip comments from the command line
         command_line = self._strip_comment(command_line)
@@ -1716,23 +1741,42 @@ class Shell:
         if not command_line.strip():
             return 0
 
-        # Check for function definition
+        # Check for function definition. Supported headers:
+        #   name() { ... } / name(a, b) { ... }                 (POSIX, params bash-extension)
+        #   function name { ... } / function name() { ... } /
+        #     function name(a, b) { ... }                       (bash, parens optional)
+        # The detection regexes here only need to recognize that this line is
+        # a function-def header — the actual params + body are parsed by
+        # ControlParser.parse_function_definition.
         import re
-        # Match both function_name() { ... } and function function_name { ... }
-        func_def_match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{', command_line.strip())
+        func_def_match = re.match(
+            r'^([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*\{',
+            command_line.strip(),
+        )
         if not func_def_match:
-            func_def_match = re.match(r'^function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{', command_line.strip())
+            func_def_match = re.match(
+                r'^function\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^)]*\))?\s*\{',
+                command_line.strip(),
+            )
 
         if func_def_match:
-            # Check if it's a complete single-line function
+            # Check if it's a complete function definition (body + closing `}`).
             if '}' in command_line:
-                # Single-line function definition - use new AST parser
-                lines = [command_line]
+                # Split into logical lines so the AST parser's multi-line path
+                # can find the closing `}` even when the caller passes a
+                # multi-line block as one big string. A single-line
+                # `name() { body; }` still hits the same code path: it
+                # collapses to a single element with `}` inside, which the
+                # single-line regex picks up.
+                lines = command_line.splitlines() or [command_line]
                 func_ast = self.control_parser.parse_function_definition(lines)
                 if func_ast and func_ast.name:
-                    # Store as AST-based function
+                    # Store as AST-based function. `params` is stored for
+                    # introspection only — call-time binding still uses
+                    # $1/$2/... — see ast_nodes.FunctionDefinition.
                     self.functions[func_ast.name] = {
                         'name': func_ast.name,
+                        'params': list(func_ast.params),
                         'body': func_ast.body,
                         'is_ast': True
                     }
@@ -1745,9 +1789,15 @@ class Shell:
                 return EXIT_CODE_FUNCTION_DEF_NEEDED
 
         # Also check for function definition without opening brace on first line
-        func_def_match2 = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*$', command_line.strip())
+        func_def_match2 = re.match(
+            r'^([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*$',
+            command_line.strip(),
+        )
         if not func_def_match2:
-            func_def_match2 = re.match(r'^function\s+([A-Za-z_][A-Za-z0-9_]*)\s*$', command_line.strip())
+            func_def_match2 = re.match(
+                r'^function\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\([^)]*\))?\s*$',
+                command_line.strip(),
+            )
 
         if func_def_match2:
             # Function definition without opening brace - signal to collect more lines

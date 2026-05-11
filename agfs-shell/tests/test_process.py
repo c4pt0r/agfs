@@ -200,9 +200,14 @@ class TestProcessFilesystemAccess:
 
     def test_process_can_list_directory(self, mock_filesystem):
         """Test process can list directories."""
-        mock_filesystem.create_directory('/testdir')
-        mock_filesystem.write_file('/testdir/file1.txt', b'content1')
-        mock_filesystem.write_file('/testdir/file2.txt', b'content2')
+        # The shared ``mock_filesystem`` fixture pre-creates ``/testdir`` with
+        # two files, so ``create_directory('/testdir')`` would raise
+        # ``FileExistsError`` and mask what this test is actually verifying.
+        # Use a dedicated path so the test is self-contained and independent
+        # of the fixture seed data.
+        mock_filesystem.create_directory('/listdir')
+        mock_filesystem.write_file('/listdir/file1.txt', b'content1')
+        mock_filesystem.write_file('/listdir/file2.txt', b'content2')
 
         process = Process(
             command='test',
@@ -210,7 +215,7 @@ class TestProcessFilesystemAccess:
             filesystem=mock_filesystem,
         )
 
-        entries = process.filesystem.list_directory('/testdir')
+        entries = process.filesystem.list_directory('/listdir')
         assert len(entries) >= 2
 
         names = [e['name'] for e in entries]
