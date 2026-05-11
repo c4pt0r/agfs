@@ -25,6 +25,9 @@ func (b *SQLiteBackend) Initialize(cfg map[string]interface{}) (*sql.DB, error) 
 }
 
 func (b *SQLiteBackend) GetTableSchema(db *sql.DB, dbName, tableName string) (string, error) {
+	if err := validateSQLIdentifier("table", tableName); err != nil {
+		return "", err
+	}
 	var createTableStmt string
 	query := "SELECT sql FROM sqlite_master WHERE type='table' AND name=?"
 	err := db.QueryRow(query, tableName).Scan(&createTableStmt)
@@ -63,7 +66,11 @@ func (b *SQLiteBackend) SwitchDatabase(db *sql.DB, dbName string) error {
 }
 
 func (b *SQLiteBackend) GetTableColumns(db *sql.DB, dbName, tableName string) ([]ColumnInfo, error) {
-	query := fmt.Sprintf("PRAGMA table_info(%s)", tableName)
+	quotedTable, err := quoteSQLIdentifier("table", tableName)
+	if err != nil {
+		return nil, err
+	}
+	query := fmt.Sprintf("PRAGMA table_info(%s)", quotedTable)
 	rows, err := db.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get table columns: %w", err)
