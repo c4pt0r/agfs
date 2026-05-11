@@ -63,8 +63,21 @@ make install
 
 Press `Ctrl+C` in the terminal where agfs-fuse is running, or use:
 ```bash
+fusermount3 -u /mnt/agfs
+# or, on systems where fuse3 installs the legacy command name:
 fusermount -u /mnt/agfs
 ```
+
+## Troubleshooting
+
+- Verify the server first: `curl -sf http://localhost:8080/api/v1/health`.
+- `fusermount3: command not found`: install FUSE 3 packages, for example `sudo apt-get install fuse3 libfuse3-dev` on Debian/Ubuntu.
+- `failed to open /dev/fuse`: FUSE is not available to the process. On Docker/Linux, pass `--device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined`; Docker Desktop on macOS does not support this mount path.
+- `operation not permitted` with `--allow-other`: ensure `/etc/fuse.conf` contains `user_allow_other`, or mount without `--allow-other`.
+- Empty or stale listings: confirm the same server URL with `--agfs-server-url`, then lower `--cache-ttl` while debugging.
+- Unmount reports the target is busy: close processes using the mount, then run `lsof +f -- /mnt/agfs` to find remaining users.
+
+For the full AGFS first-run matrix, see [../docs/first-run.md](../docs/first-run.md).
 
 ## Usage
 

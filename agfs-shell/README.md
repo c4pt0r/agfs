@@ -127,8 +127,10 @@ curl http://localhost:8080/api/v1/health
 
 # Option 2: Run from source
 cd agfs-server
-go run main.go
+make dev
 ```
+
+For the full installer/source/Docker/webapp/FUSE/MCP startup matrix, see [../docs/first-run.md](../docs/first-run.md).
 
 ## Installation
 
