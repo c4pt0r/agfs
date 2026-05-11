@@ -432,10 +432,7 @@ func (b *TiDBBackend) Dequeue(queueName string) (QueueMessage, bool, error) {
 	var id int64
 	var data string
 
-	querySQL := fmt.Sprintf(
-		"SELECT id, data FROM %s WHERE deleted = 0 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED",
-		tableName,
-	)
+	querySQL := b.backend.GetDequeueQuery(tableName)
 	err = tx.QueryRow(querySQL).Scan(&id, &data)
 
 	if err == sql.ErrNoRows {
@@ -579,7 +576,7 @@ func (b *TiDBBackend) GetLastEnqueueTime(queueName string) (time.Time, error) {
 
 	var timestamp int64
 	querySQL := fmt.Sprintf(
-		"SELECT MAX(timestamp) FROM %s WHERE deleted = 0",
+		"SELECT COALESCE(MAX(timestamp), 0) FROM %s WHERE deleted = 0",
 		tableName,
 	)
 	err = b.db.QueryRow(querySQL).Scan(&timestamp)
@@ -659,25 +656,21 @@ func (b *TiDBBackend) CreateQueue(queueName string) error {
 	tableName := sanitizeTableName(queueName)
 
 	// Create the queue table
-	createTableSQL := getCreateTableSQL(tableName)
 	skipCreateDDL := false
 	failpoint.Inject("queuefsSkipCreateQueueDDL", func() {
-		// TODO: upstream SQLite queue-table DDL is not yet compatible with the
-		// partial-removal failpoint regression path. This failpoint temporarily
-		// bypasses queue table creation so that the RemoveQueue metadata semantics
-		// can still be covered with a SQLite-backed plugin test. Replace this with
-		// a real SQLite queue-creation path once upstream SQLite support is fixed.
 		skipCreateDDL = true
 	})
 	if !skipCreateDDL {
-		if _, err := b.db.Exec(createTableSQL); err != nil {
-			return fmt.Errorf("failed to create queue table: %w", err)
+		for _, createTableSQL := range b.backend.GetCreateQueueSQL(tableName) {
+			if _, err := b.db.Exec(createTableSQL); err != nil {
+				return fmt.Errorf("failed to create queue table: %w", err)
+			}
 		}
 	}
 
 	// Register in queuefs_registry
 	_, err := b.db.Exec(
-		"INSERT IGNORE INTO queuefs_registry (queue_name, table_name) VALUES (?, ?)",
+		b.backend.GetRegisterQueueSQL(),
 		queueName, tableName,
 	)
 	if err != nil {

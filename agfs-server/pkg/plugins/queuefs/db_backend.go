@@ -22,6 +22,15 @@ type DBBackend interface {
 	// GetInitSQL returns the SQL statements to initialize the schema
 	GetInitSQL() []string
 
+	// GetCreateQueueSQL returns the SQL statements to create a queue table.
+	GetCreateQueueSQL(tableName string) []string
+
+	// GetRegisterQueueSQL returns the SQL used to register a queue/table pair.
+	GetRegisterQueueSQL() string
+
+	// GetDequeueQuery returns the SQL used to claim the next queue message.
+	GetDequeueQuery(tableName string) string
+
 	// GetDriverName returns the driver name
 	GetDriverName() string
 }
@@ -56,24 +65,36 @@ func (b *SQLiteDBBackend) Open(cfg map[string]interface{}) (*sql.DB, error) {
 
 func (b *SQLiteDBBackend) GetInitSQL() []string {
 	return []string{
-		// Queue metadata table to track all queues (including empty ones)
-		`CREATE TABLE IF NOT EXISTS queue_metadata (
+		// Queue registry table to track all queues and their backing tables.
+		`CREATE TABLE IF NOT EXISTS queuefs_registry (
 			queue_name TEXT PRIMARY KEY,
-			created_at INTEGER DEFAULT (strftime('%s', 'now')),
-			last_updated INTEGER DEFAULT (strftime('%s', 'now'))
+			table_name TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
-		// Queue messages table
-		`CREATE TABLE IF NOT EXISTS queue_messages (
+	}
+}
+
+func (b *SQLiteDBBackend) GetCreateQueueSQL(tableName string) []string {
+	return []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			queue_name TEXT NOT NULL,
 			message_id TEXT NOT NULL,
 			data TEXT NOT NULL,
 			timestamp INTEGER NOT NULL,
-			created_at INTEGER DEFAULT (strftime('%s', 'now'))
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_queue_name ON queue_messages(queue_name)`,
-		`CREATE INDEX IF NOT EXISTS idx_queue_order ON queue_messages(queue_name, id)`,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			deleted INTEGER DEFAULT 0,
+			deleted_at DATETIME
+		)`, tableName),
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_%s_deleted_id ON %s (deleted, id)`, tableName, tableName),
 	}
+}
+
+func (b *SQLiteDBBackend) GetRegisterQueueSQL() string {
+	return "INSERT OR IGNORE INTO queuefs_registry (queue_name, table_name) VALUES (?, ?)"
+}
+
+func (b *SQLiteDBBackend) GetDequeueQuery(tableName string) string {
+	return fmt.Sprintf("SELECT id, data FROM %s WHERE deleted = 0 ORDER BY id LIMIT 1", tableName)
 }
 
 // TiDBDBBackend implements DBBackend for TiDB
@@ -210,6 +231,29 @@ func (b *TiDBDBBackend) GetInitSQL() []string {
 	}
 }
 
+func (b *TiDBDBBackend) GetCreateQueueSQL(tableName string) []string {
+	return []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+			id BIGINT AUTO_INCREMENT PRIMARY KEY,
+			message_id VARCHAR(64) NOT NULL,
+			data LONGBLOB NOT NULL,
+			timestamp BIGINT NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			deleted TINYINT(1) DEFAULT 0,
+			deleted_at TIMESTAMP NULL,
+			INDEX idx_deleted_id (deleted, id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`, tableName),
+	}
+}
+
+func (b *TiDBDBBackend) GetRegisterQueueSQL() string {
+	return "INSERT IGNORE INTO queuefs_registry (queue_name, table_name) VALUES (?, ?)"
+}
+
+func (b *TiDBDBBackend) GetDequeueQuery(tableName string) string {
+	return fmt.Sprintf("SELECT id, data FROM %s WHERE deleted = 0 ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED", tableName)
+}
+
 // Helper functions
 
 func extractDatabaseName(dsn string, configDB string) string {
@@ -239,20 +283,6 @@ func sanitizeTableName(queueName string) string {
 
 	// Prefix with queuefs_queue_ to avoid conflicts with system tables
 	return "queuefs_queue_" + tableName
-}
-
-// getCreateTableSQL returns the SQL to create a queue table
-func getCreateTableSQL(tableName string) string {
-	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
-		id BIGINT AUTO_INCREMENT PRIMARY KEY,
-		message_id VARCHAR(64) NOT NULL,
-		data LONGBLOB NOT NULL,
-		timestamp BIGINT NOT NULL,
-		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-		deleted TINYINT(1) DEFAULT 0,
-		deleted_at TIMESTAMP NULL,
-		INDEX idx_deleted_id (deleted, id)
-	) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`, tableName)
 }
 
 // CreateBackend creates the appropriate database backend
