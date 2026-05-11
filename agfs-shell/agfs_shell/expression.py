@@ -757,15 +757,31 @@ class ArithmeticEvaluator:
             return '0'
 
     def _eval_node(self, node) -> float:
-        """Recursively evaluate AST node"""
+        """Recursively evaluate AST node.
+
+        ``ast.Constant`` covers every numeric literal in Python 3.8+
+        (the project's minimum). The previous code also had a
+        ``hasattr(ast, 'Num') and isinstance(node, ast.Num)`` branch
+        for "Python 3.7 compatibility", but:
+
+        * Python 3.7 is end-of-life and below the project's pyproject
+          ``requires-python = ">=3.8"``.
+        * In 3.8-3.13 ``ast.Num`` is a deprecated shim that emits a
+          DeprecationWarning on every attribute lookup — visible in
+          our test suite as 9 warnings per arithmetic test.
+        * Python 3.14 removes ``ast.Num`` entirely; even the
+          ``hasattr`` guard couldn't make that branch live again.
+
+        Dropping the deprecated branch silences the warning today and
+        makes the code Python-3.14-safe. Any future literal type
+        (e.g. ``ast.JoinedStr``) would still hit the
+        ``Node type … not allowed`` error path below — that's the
+        intended safety net.
+        """
         if isinstance(node, ast.Constant):
             if isinstance(node.value, (int, float)):
                 return node.value
             raise ValueError(f"Only numeric constants allowed, got {type(node.value)}")
-
-        # Python 3.7 compatibility
-        if hasattr(ast, 'Num') and isinstance(node, ast.Num):
-            return node.n
 
         if isinstance(node, ast.BinOp):
             if type(node.op) not in self.ALLOWED_OPS:

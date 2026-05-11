@@ -308,5 +308,96 @@ class TestExpressionExpander:
             assert result == 'plain text'
 
 
+# =============================================================================
+# Python 3.14 forward-compat: ast.Num removal regression
+# =============================================================================
+
+class TestArithmeticPython314Compat:
+    """Pin the absence of the deprecated ``ast.Num`` branch.
+
+    Background: ``agfs_shell/expression.py`` used to fall back to
+    ``isinstance(node, ast.Num)`` with a ``hasattr(ast, 'Num')`` guard
+    that was a no-op in Python 3.8+ (because ``ast.Constant`` already
+    catches all numeric literals) and emitted a DeprecationWarning on
+    every attribute lookup. Python 3.14 removes ``ast.Num`` outright.
+
+    These tests pin the new contract: arithmetic still works, and the
+    ``ast.Num`` DeprecationWarning no longer appears.
+    """
+
+    def _arith(self, mock_filesystem, expression):
+        """Run ``$((expression))`` through the expander and return the
+        result string."""
+        import re
+        from agfs_shell.shell import Shell
+        from unittest.mock import patch
+
+        with patch("agfs_shell.shell.AGFSFileSystem", return_value=mock_filesystem):
+            shell = Shell()
+            expander = ExpressionExpander(shell)
+            out = expander.expand(f"$(({expression}))")
+            # `expand` returns either the bare result for a sole
+            # `$((...))` token or the expression embedded in text; we
+            # always wrap in `$((...))` so the result is the bare
+            # arithmetic value.
+            return out.strip()
+
+    def test_arithmetic_still_works(self, mock_filesystem):
+        # The same numeric constants that used to traverse the
+        # ``ast.Num`` branch on Python <3.8 now exclusively flow
+        # through ``ast.Constant``.
+        assert self._arith(mock_filesystem, "2 + 3") == "5"
+        assert self._arith(mock_filesystem, "10 / 2") == "5"
+        assert self._arith(mock_filesystem, "(1 + 2) * 3") == "9"
+        assert self._arith(mock_filesystem, "-(-7)") == "7"
+
+    def test_arithmetic_emits_no_ast_num_deprecation_warning(self, mock_filesystem, recwarn):
+        # Exercise every operator path so any lingering ``ast.Num``
+        # reference would fire.
+        for expr in ["1 + 1", "5 - 2", "3 * 4", "8 / 2", "9 % 4", "2 ** 3", "-5"]:
+            self._arith(mock_filesystem, expr)
+
+        offending = [
+            w for w in recwarn.list
+            if issubclass(w.category, DeprecationWarning)
+            and "ast.Num" in str(w.message)
+        ]
+        assert not offending, (
+            "ast.Num DeprecationWarning leaked after the Python 3.14 "
+            f"compat fix: {[str(w.message) for w in offending]}"
+        )
+
+    def test_no_executable_ast_num_reference(self):
+        """Belt-and-braces: prove no *executable* ``ast.Num`` access
+        remains. A future "Python 3.7 compat" revert that re-adds the
+        deprecated branch would re-introduce the runtime lookup here
+        and fail this assertion without needing the right Python
+        version installed.
+
+        We parse the source and look for attribute accesses on the
+        ``ast`` module rather than grep, so docstrings and comments
+        that explain *why* the branch was removed don't count as
+        executable references.
+        """
+        import ast as _stdlib_ast
+        import inspect
+        from agfs_shell import expression
+
+        tree = _stdlib_ast.parse(inspect.getsource(expression))
+        offending = [
+            node
+            for node in _stdlib_ast.walk(tree)
+            if isinstance(node, _stdlib_ast.Attribute)
+            and isinstance(node.value, _stdlib_ast.Name)
+            and node.value.id == "ast"
+            and node.attr == "Num"
+        ]
+        assert not offending, (
+            "executable ast.Num reference re-appeared in expression.py "
+            "— Python 3.14 removes ast.Num entirely, so this would "
+            "break arithmetic expansion on that interpreter."
+        )
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
