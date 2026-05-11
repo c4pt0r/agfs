@@ -30,6 +30,26 @@ Useful environment overrides:
 - `AGFS_E2E_SKIP_WEBAPP=1` skips the npm/webapp build smoke when Node/npm is unavailable. Do not use this in CI unless a separate webapp e2e job covers the same path.
 - `AGFS_E2E_LOG_FILE=/tmp/agfs-e2e.log` changes the server log path.
 
+## Backend/Server Harness
+
+Run from the repository root:
+
+```bash
+scripts/e2e/run-backend-e2e.sh
+```
+
+This focused backend gate starts real `agfs-server` processes from temporary
+configs. It asserts exact healthy and degraded readiness semantics, verifies
+`/api/v1/mounts` includes mounted and failed configured mounts, exercises the
+HTTP file API, checks request-body `413` behavior, and smokes mounted MemFS,
+QueueFS, ServerInfoFS, HelloFS, and default DevFS paths.
+
+Useful environment overrides:
+
+- `AGFS_BACKEND_E2E_PORT=18090` changes the first server port. The degraded
+  readiness scenario uses the next port.
+- `AGFS_BACKEND_E2E_HOST=127.0.0.1` changes the bind host used by clients.
+
 ## Ownership Lanes
 
 - Backend/server e2e cases live under task #25.
