@@ -51,8 +51,12 @@ func (b *MySQLBackend) GetTableSchema(db *sql.DB, dbName, tableName string) (str
 	}
 
 	var tblName, createTableStmt string
-	query := fmt.Sprintf("SHOW CREATE TABLE `%s`", tableName)
-	err := db.QueryRow(query).Scan(&tblName, &createTableStmt)
+	quotedTable, err := quoteSQLIdentifier("table", tableName)
+	if err != nil {
+		return "", err
+	}
+	query := fmt.Sprintf("SHOW CREATE TABLE %s", quotedTable)
+	err = db.QueryRow(query).Scan(&tblName, &createTableStmt)
 	if err != nil {
 		return "", fmt.Errorf("failed to get table schema: %w", err)
 	}
@@ -104,7 +108,11 @@ func (b *MySQLBackend) SwitchDatabase(db *sql.DB, dbName string) error {
 	if dbName == "" {
 		return nil
 	}
-	_, err := db.Exec(fmt.Sprintf("USE `%s`", dbName))
+	quotedDB, err := quoteSQLIdentifier("database", dbName)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(fmt.Sprintf("USE %s", quotedDB))
 	if err != nil {
 		return fmt.Errorf("failed to switch to database %s: %w", dbName, err)
 	}
@@ -119,7 +127,11 @@ func (b *MySQLBackend) GetTableColumns(db *sql.DB, dbName, tableName string) ([]
 		}
 	}
 
-	query := fmt.Sprintf("SHOW COLUMNS FROM `%s`", tableName)
+	quotedTable, err := quoteSQLIdentifier("table", tableName)
+	if err != nil {
+		return nil, err
+	}
+	query := fmt.Sprintf("SHOW COLUMNS FROM %s", quotedTable)
 	rows, err := db.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get table columns: %w", err)

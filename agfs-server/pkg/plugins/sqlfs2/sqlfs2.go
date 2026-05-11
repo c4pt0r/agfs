@@ -22,13 +22,13 @@ const (
 
 // Session represents a Plan 9 style session for SQL operations
 type Session struct {
-	id         int64            // Numeric session ID
+	id         int64 // Numeric session ID
 	dbName     string
 	tableName  string
-	tx         *sql.Tx          // SQL transaction
-	result     []byte           // Query result (JSON)
-	lastError  string           // Error message
-	lastAccess time.Time        // Last access time
+	tx         *sql.Tx   // SQL transaction
+	result     []byte    // Query result (JSON)
+	lastError  string    // Error message
+	lastAccess time.Time // Last access time
 	mu         sync.Mutex
 }
 
@@ -438,26 +438,48 @@ func isDatabaseLevelFile(name string) bool {
 	return name == "ctl"
 }
 
+func validatePathSQLIdentifier(kind, name string) error {
+	if err := validateSQLIdentifier(kind, name); err != nil {
+		return filesystem.NewInvalidArgumentError(kind, name, err.Error())
+	}
+	return nil
+}
+
+func validatePathSQLIdentifiers(dbName, tableName string) error {
+	if dbName != "" {
+		if err := validatePathSQLIdentifier("database", dbName); err != nil {
+			return err
+		}
+	}
+	if tableName != "" {
+		if err := validatePathSQLIdentifier("table", tableName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // parsePath parses a path into (dbName, tableName, sid, operation)
 // Supported paths:
-//   /                              -> ("", "", "", "")
-//   /ctl                           -> ("", "", "", "ctl") - root level ctl
-//   /<sid>                         -> ("", "", sid, "")   - root level session
-//   /<sid>/query                   -> ("", "", sid, "query")
-//   /dbName                        -> (dbName, "", "", "")
-//   /dbName/ctl                    -> (dbName, "", "", "ctl") - database level ctl
-//   /dbName/<sid>                  -> (dbName, "", sid, "") - database level session
-//   /dbName/<sid>/query            -> (dbName, "", sid, "query") - database level session file
-//   /dbName/tableName              -> (dbName, tableName, "", "")
-//   /dbName/tableName/ctl          -> (dbName, tableName, "", "ctl")
-//   /dbName/tableName/schema       -> (dbName, tableName, "", "schema")
-//   /dbName/tableName/count        -> (dbName, tableName, "", "count")
-//   /dbName/tableName/<sid>        -> (dbName, tableName, sid, "")
-//   /dbName/tableName/<sid>/query  -> (dbName, tableName, sid, "query")
-//   /dbName/tableName/<sid>/result -> (dbName, tableName, sid, "result")
-//   /dbName/tableName/<sid>/ctl    -> (dbName, tableName, sid, "ctl")
-//   /dbName/tableName/<sid>/data   -> (dbName, tableName, sid, "data")
-//   /dbName/tableName/<sid>/error  -> (dbName, tableName, sid, "error")
+//
+//	/                              -> ("", "", "", "")
+//	/ctl                           -> ("", "", "", "ctl") - root level ctl
+//	/<sid>                         -> ("", "", sid, "")   - root level session
+//	/<sid>/query                   -> ("", "", sid, "query")
+//	/dbName                        -> (dbName, "", "", "")
+//	/dbName/ctl                    -> (dbName, "", "", "ctl") - database level ctl
+//	/dbName/<sid>                  -> (dbName, "", sid, "") - database level session
+//	/dbName/<sid>/query            -> (dbName, "", sid, "query") - database level session file
+//	/dbName/tableName              -> (dbName, tableName, "", "")
+//	/dbName/tableName/ctl          -> (dbName, tableName, "", "ctl")
+//	/dbName/tableName/schema       -> (dbName, tableName, "", "schema")
+//	/dbName/tableName/count        -> (dbName, tableName, "", "count")
+//	/dbName/tableName/<sid>        -> (dbName, tableName, sid, "")
+//	/dbName/tableName/<sid>/query  -> (dbName, tableName, sid, "query")
+//	/dbName/tableName/<sid>/result -> (dbName, tableName, sid, "result")
+//	/dbName/tableName/<sid>/ctl    -> (dbName, tableName, sid, "ctl")
+//	/dbName/tableName/<sid>/data   -> (dbName, tableName, sid, "data")
+//	/dbName/tableName/<sid>/error  -> (dbName, tableName, sid, "error")
 func (fs *sqlfs2FS) parsePath(path string) (dbName, tableName, sid, operation string, err error) {
 	path = strings.TrimPrefix(path, "/")
 	parts := strings.Split(path, "/")
@@ -479,7 +501,11 @@ func (fs *sqlfs2FS) parsePath(path string) (dbName, tableName, sid, operation st
 			return "", "", parts[0], "", nil
 		}
 		// Database level: /dbName
-		return parts[0], "", "", "", nil
+		dbName := parts[0]
+		if err := validatePathSQLIdentifiers(dbName, ""); err != nil {
+			return "", "", "", "", err
+		}
+		return dbName, "", "", "", nil
 	}
 
 	if len(parts) == 2 {
@@ -493,14 +519,26 @@ func (fs *sqlfs2FS) parsePath(path string) (dbName, tableName, sid, operation st
 		}
 		if isDatabaseLevelFile(parts[1]) {
 			// Database level ctl: /dbName/ctl
-			return parts[0], "", "", parts[1], nil
+			dbName := parts[0]
+			if err := validatePathSQLIdentifiers(dbName, ""); err != nil {
+				return "", "", "", "", err
+			}
+			return dbName, "", "", parts[1], nil
 		}
 		if isSessionID(parts[1]) {
 			// Database level session: /dbName/<sid>
-			return parts[0], "", parts[1], "", nil
+			dbName := parts[0]
+			if err := validatePathSQLIdentifiers(dbName, ""); err != nil {
+				return "", "", "", "", err
+			}
+			return dbName, "", parts[1], "", nil
 		}
 		// Table level: /dbName/tableName
-		return parts[0], parts[1], "", "", nil
+		dbName, tableName := parts[0], parts[1]
+		if err := validatePathSQLIdentifiers(dbName, tableName); err != nil {
+			return "", "", "", "", err
+		}
+		return dbName, tableName, "", "", nil
 	}
 
 	if len(parts) == 3 {
@@ -512,13 +550,25 @@ func (fs *sqlfs2FS) parsePath(path string) (dbName, tableName, sid, operation st
 		// - /dbName/tableName/<sid> -> session directory
 		if isSessionID(parts[1]) && isSessionFile(parts[2]) {
 			// Database level session file: /dbName/<sid>/query
-			return parts[0], "", parts[1], parts[2], nil
+			dbName := parts[0]
+			if err := validatePathSQLIdentifiers(dbName, ""); err != nil {
+				return "", "", "", "", err
+			}
+			return dbName, "", parts[1], parts[2], nil
 		}
 		if isTableLevelFile(parts[2]) {
-			return parts[0], parts[1], "", parts[2], nil
+			dbName, tableName := parts[0], parts[1]
+			if err := validatePathSQLIdentifiers(dbName, tableName); err != nil {
+				return "", "", "", "", err
+			}
+			return dbName, tableName, "", parts[2], nil
 		}
 		if isSessionID(parts[2]) {
-			return parts[0], parts[1], parts[2], "", nil
+			dbName, tableName := parts[0], parts[1]
+			if err := validatePathSQLIdentifiers(dbName, tableName); err != nil {
+				return "", "", "", "", err
+			}
+			return dbName, tableName, parts[2], "", nil
 		}
 		return "", "", "", "", filesystem.NewNotFoundError("stat", path)
 	}
@@ -528,7 +578,11 @@ func (fs *sqlfs2FS) parsePath(path string) (dbName, tableName, sid, operation st
 		if !isSessionID(parts[2]) {
 			return "", "", "", "", filesystem.NewNotFoundError("stat", path)
 		}
-		return parts[0], parts[1], parts[2], parts[3], nil
+		dbName, tableName := parts[0], parts[1]
+		if err := validatePathSQLIdentifiers(dbName, tableName); err != nil {
+			return "", "", "", "", err
+		}
+		return dbName, tableName, parts[2], parts[3], nil
 	}
 
 	return "", "", "", "", filesystem.NewNotFoundError("stat", path)
@@ -743,9 +797,12 @@ func (fs *sqlfs2FS) Read(path string, offset int64, size int64) ([]byte, error) 
 				return nil, err
 			}
 
-			sqlStmt := fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", dbName, tableName)
+			sqlStmt, err := countTableSQL(dbName, tableName)
+			if err != nil {
+				return nil, err
+			}
 			var count int64
-			err := fs.plugin.db.QueryRow(sqlStmt).Scan(&count)
+			err = fs.plugin.db.QueryRow(sqlStmt).Scan(&count)
 			if err != nil {
 				return nil, fmt.Errorf("count query error: %w", err)
 			}
@@ -1321,15 +1378,12 @@ func (fs *sqlfs2FS) Write(path string, data []byte, offset int64, flags filesyst
 				}
 			}
 
-			placeholders := make([]string, len(columnNames))
-			for i := range placeholders {
-				placeholders[i] = "?"
+			insertSQL, err := insertRowsSQL(dbName, tableName, columnNames)
+			if err != nil {
+				session.lastError = err.Error()
+				session.result = nil
+				return 0, err
 			}
-
-			insertSQL := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES (%s)",
-				dbName, tableName,
-				strings.Join(columnNames, ", "),
-				strings.Join(placeholders, ", "))
 
 			if _, err := session.tx.Exec(insertSQL, values...); err != nil {
 				session.lastError = fmt.Sprintf("insert error at record %d: %v", idx+1, err)
@@ -1394,8 +1448,11 @@ func (fs *sqlfs2FS) RemoveAll(path string) error {
 	// Path should be /dbName
 	if dbName != "" && tableName == "" && sid == "" && operation == "" {
 		// Execute DROP DATABASE
-		sqlStmt := fmt.Sprintf("DROP DATABASE IF EXISTS %s", dbName)
-		_, err := fs.plugin.db.Exec(sqlStmt)
+		sqlStmt, err := dropDatabaseSQL(fs.plugin.backend, dbName)
+		if err != nil {
+			return err
+		}
+		_, err = fs.plugin.db.Exec(sqlStmt)
 		if err != nil {
 			return fmt.Errorf("failed to drop database: %w", err)
 		}
@@ -1413,8 +1470,11 @@ func (fs *sqlfs2FS) RemoveAll(path string) error {
 		}
 
 		// Execute DROP TABLE
-		sqlStmt := fmt.Sprintf("DROP TABLE IF EXISTS %s.%s", dbName, tableName)
-		_, err := fs.plugin.db.Exec(sqlStmt)
+		sqlStmt, err := dropTableSQL(dbName, tableName)
+		if err != nil {
+			return err
+		}
+		_, err = fs.plugin.db.Exec(sqlStmt)
 		if err != nil {
 			return fmt.Errorf("failed to drop table: %w", err)
 		}
@@ -2239,9 +2299,11 @@ func (h *SQLFileHandle) populateReadBuffer() error {
 			return fmt.Errorf("invalid path for count")
 		}
 		// Use transaction for count query
-		sqlStmt := fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", h.dbName, h.tableName)
+		sqlStmt, err := countTableSQL(h.dbName, h.tableName)
+		if err != nil {
+			return err
+		}
 		var count int64
-		var err error
 		if h.tx != nil {
 			err = h.tx.QueryRow(sqlStmt).Scan(&count)
 		} else {
@@ -2593,15 +2655,10 @@ func (h *SQLFileHandle) executeInsertJSON(data string) error {
 			}
 		}
 
-		placeholders := make([]string, len(columnNames))
-		for i := range placeholders {
-			placeholders[i] = "?"
+		insertSQL, err := insertRowsSQL(h.dbName, h.tableName, columnNames)
+		if err != nil {
+			return err
 		}
-
-		insertSQL := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES (%s)",
-			h.dbName, h.tableName,
-			strings.Join(columnNames, ", "),
-			strings.Join(placeholders, ", "))
 
 		if _, err := h.tx.Exec(insertSQL, values...); err != nil {
 			return fmt.Errorf("insert error at record %d: %w", idx+1, err)
