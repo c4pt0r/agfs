@@ -8,6 +8,31 @@ from requests.exceptions import ConnectionError, Timeout, RequestException
 from .exceptions import AGFSClientError, AGFSNotSupportedError
 
 
+class _ClosedSession:
+    """Sentinel that replaces ``AGFSClient.session`` after ``close()``.
+
+    Any attribute access raises ``AGFSClientError`` so a use-after-close
+    bug surfaces as a clear, actionable error at the call site instead
+    of as a cryptic stack from inside ``urllib3`` ("connection pool is
+    closed", "Session is closed", etc.) several frames deep.
+
+    The sentinel is intentionally a separate class rather than just
+    ``None``: it lets the existing ``self.session.get(...)`` /
+    ``self.session.post(...)`` call shape remain unchanged in every
+    request method while still failing fast.
+    """
+
+    __slots__ = ()
+
+    def __getattr__(self, name: str):
+        raise AGFSClientError(
+            "AGFSClient has been closed; create a new client to issue requests"
+        )
+
+    def __repr__(self) -> str:  # noqa: D401 - tiny sentinel
+        return "<closed AGFSClient session>"
+
+
 class AGFSClient:
     """Client for interacting with AGFS (Plugin-based File System) Server API"""
 
@@ -51,6 +76,70 @@ class AGFSClient:
         self.session = requests.Session()
         self.timeout = timeout
         self.streaming_progress_timeout = streaming_progress_timeout
+        # Tracks whether close() has run. Subsequent close() calls and
+        # __exit__ uses are idempotent; using the client after close()
+        # raises a clear error rather than producing a cryptic
+        # "session already closed" stack from requests.
+        self._closed = False
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def close(self):
+        """Release the underlying ``requests.Session`` and its HTTP
+        connection pool.
+
+        After ``close()``, the client refuses further requests:
+        ``self.session`` is replaced with a :class:`_ClosedSession`
+        sentinel whose attribute accesses raise
+        :class:`AGFSClientError`. That turns a post-close ``c.ls('/')``
+        into a clear "AGFSClient has been closed" error at the call
+        site instead of a cryptic stack from inside ``urllib3``.
+
+        Safe to call multiple times. The first call forwards to
+        ``Session.close()``; subsequent calls are no-ops. The
+        sentinel swap happens in a ``finally`` so a buggy custom
+        adapter that raises in ``Session.close`` still leaves the
+        client in a defensible "closed" state — preventing a retry
+        loop from reusing the same broken Session.
+        """
+        if self._closed:
+            return
+        try:
+            self.session.close()
+        finally:
+            # Replace the session with a sentinel that fails fast on
+            # any subsequent use, and flip the lifecycle flag. Both
+            # happen even if Session.close raised — see docstring.
+            self.session = _ClosedSession()
+            self._closed = True
+
+    def __enter__(self):
+        """Enter a ``with AGFSClient(...) as c:`` block.
+
+        Returns ``self`` so callers can do
+        ``with AGFSClient(url) as c: c.ls('/')`` in the idiomatic
+        Python style. The contained statements run with a guaranteed
+        cleanup path: ``__exit__`` calls :meth:`close` regardless of
+        whether the block exits normally or via an exception.
+        """
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        """Exit the ``with`` block by closing the underlying session.
+
+        Returning ``None`` (Python's default) means we don't suppress
+        any exception raised inside the ``with`` block — callers see
+        the original exception, just with the connection pool already
+        released by the time it surfaces.
+        """
+        self.close()
+
+    @property
+    def is_closed(self) -> bool:
+        """Whether :meth:`close` has been called on this client."""
+        return self._closed
 
     def _streaming_timeout(self):
         """Tuple suitable for ``requests`` ``timeout=`` on streaming calls.
