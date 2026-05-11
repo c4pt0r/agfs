@@ -30,7 +30,7 @@ def validate_webapp_dist(webapp_dir=WEBAPP_DIST_DIR):
         f"Expected: {index_html}\n\n"
         "Build the frontend before starting integrated webapp mode:\n"
         "  cd agfs-shell/webapp\n"
-        "  npm install\n"
+        "  npm ci\n"
         "  npm run build\n\n"
         "Or run the setup helper:\n"
         "  cd agfs-shell/webapp\n"
