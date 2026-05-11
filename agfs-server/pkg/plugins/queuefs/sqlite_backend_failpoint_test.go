@@ -35,33 +35,10 @@ func TestQueueFSSQLiteRemoveQueuePartialFailureRegression(t *testing.T) {
 		t.Fatalf("unexpected backend type %T", plugin.backend)
 	}
 
-	// TODO: upstream SQLite queue creation still does not use a SQLite-compatible
-	// queue-table/registry creation path. Until that is fixed, seed registry/cache
-	// state directly here and keep this test focused on RemoveQueue partial-success
-	// semantics.
-	if _, err := backend.db.Exec(`CREATE TABLE IF NOT EXISTS queuefs_registry (
-		queue_name TEXT PRIMARY KEY,
-		table_name TEXT NOT NULL,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-	)`); err != nil {
-		t.Fatalf("create queuefs_registry: %v", err)
-	}
-	for _, entry := range []struct {
-		queueName string
-		tableName string
-	}{
-		{"jobs", "queuefs_queue_jobs"},
-		{"logs", "queuefs_queue_logs"},
-		{"alerts", "queuefs_queue_alerts"},
-	} {
-		if _, err := backend.db.Exec(
-			"INSERT INTO queuefs_registry (queue_name, table_name) VALUES (?, ?)",
-			entry.queueName,
-			entry.tableName,
-		); err != nil {
-			t.Fatalf("seed queue registry for %s: %v", entry.queueName, err)
+	for _, queueName := range []string{"jobs", "logs", "alerts"} {
+		if err := backend.CreateQueue(queueName); err != nil {
+			t.Fatalf("create queue %s: %v", queueName, err)
 		}
-		backend.tableCache[entry.queueName] = entry.tableName
 	}
 
 	// Inject a DROP TABLE failure on the second removal attempt so the test can
