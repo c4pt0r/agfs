@@ -16,6 +16,28 @@ except ImportError:
 from .utils.io_wrappers import BufferedTextIO
 
 
+WEBAPP_DIST_DIR = Path(__file__).parent.parent / 'webapp' / 'dist'
+
+
+def validate_webapp_dist(webapp_dir=WEBAPP_DIST_DIR):
+    """Return the built webapp directory or raise an actionable setup error."""
+    index_html = webapp_dir / 'index.html'
+    if index_html.is_file():
+        return webapp_dir
+
+    raise RuntimeError(
+        "Web app build output not found.\n"
+        f"Expected: {index_html}\n\n"
+        "Build the frontend before starting integrated webapp mode:\n"
+        "  cd agfs-shell/webapp\n"
+        "  npm install\n"
+        "  npm run build\n\n"
+        "Or run the setup helper:\n"
+        "  cd agfs-shell/webapp\n"
+        "  ./setup.sh"
+    )
+
+
 class ShellSession:
     """A shell session for a WebSocket connection"""
 
@@ -110,6 +132,7 @@ class WebAppServer:
         self.app = None
         self.runner = None
         self.sessions = {}  # WebSocket sessions
+        self.webapp_dir = validate_webapp_dist()
 
     async def handle_explorer(self, request):
         """Get directory structure for Explorer (optimized API)"""
@@ -495,18 +518,15 @@ class WebAppServer:
 
     async def handle_static(self, request):
         """Serve static files"""
-        # Serve the built React app
-        webapp_dir = Path(__file__).parent.parent / 'webapp' / 'dist'
-
         path = request.match_info.get('path', 'index.html')
         if path == '':
             path = 'index.html'
 
-        file_path = webapp_dir / path
+        file_path = self.webapp_dir / path
 
         # Handle client-side routing - serve index.html for non-existent paths
         if not file_path.exists() or file_path.is_dir():
-            file_path = webapp_dir / 'index.html'
+            file_path = self.webapp_dir / 'index.html'
 
         if file_path.exists() and file_path.is_file():
             return web.FileResponse(file_path)
