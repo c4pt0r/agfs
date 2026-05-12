@@ -1,0 +1,97 @@
+name: agfs-shell
+
+on:
+  push:
+    branches: [master, main, develop]
+    paths:
+      - ".github/workflows/agfs-shell.yml"
+      - "agfs-shell/**"
+      - "agfs-sdk/python/**"
+  pull_request:
+    branches: [master, main, develop]
+    paths:
+      - ".github/workflows/agfs-shell.yml"
+      - "agfs-shell/**"
+      - "agfs-sdk/python/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agfs-shell-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agfs-shell
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: latest
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Check code formatting with Black
+        run: uv run black --check agfs_shell/ tests/
+
+      - name: Check import sorting with isort
+        run: uv run isort --check-only agfs_shell/ tests/
+
+      - name: Lint with ruff
+        run: uv run ruff check agfs_shell/ tests/
+
+      - name: Type check with mypy
+        run: uv run mypy agfs_shell/ --ignore-missing-imports
+        continue-on-error: true
+
+  tests:
+    name: tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    defaults:
+      run:
+        working-directory: agfs-shell
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: latest
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Run tests with coverage
+        run: uv run pytest tests/ -v --cov=agfs_shell --cov-report=xml --cov-report=term
+
+      - name: Upload coverage artifact
+        if: matrix.python-version == '3.11'
+        uses: actions/upload-artifact@v4
+        with:
+          name: agfs-shell-coverage
+          path: agfs-shell/coverage.xml

@@ -1,0 +1,50 @@
+name: agfs-go-modules
+
+on:
+  push:
+    branches: [master, main, develop]
+    paths:
+      - ".github/workflows/agfs-go.yml"
+      - "agfs-fuse/**"
+      - "agfs-sdk/go/**"
+  pull_request:
+    branches: [master, main, develop]
+    paths:
+      - ".github/workflows/agfs-go.yml"
+      - "agfs-fuse/**"
+      - "agfs-sdk/go/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agfs-go-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: ${{ matrix.name }} tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: agfs-sdk/go
+            path: agfs-sdk/go
+            go-version-file: agfs-sdk/go/go.mod
+          - name: agfs-fuse
+            path: agfs-fuse
+            go-version-file: agfs-fuse/go.mod
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.go-version-file }}
+
+      - name: Run Go tests
+        working-directory: ${{ matrix.path }}
+        run: go test -v ./...

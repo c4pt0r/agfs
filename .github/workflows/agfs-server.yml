@@ -1,0 +1,65 @@
+name: agfs-server
+
+on:
+  push:
+    branches: [master, main, develop]
+    paths:
+      - ".github/workflows/agfs-server.yml"
+      - "agfs-server/**"
+      - "agfs-sdk/go/**"
+  pull_request:
+    branches: [master, main, develop]
+    paths:
+      - ".github/workflows/agfs-server.yml"
+      - "agfs-server/**"
+      - "agfs-sdk/go/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agfs-server-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: go test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: agfs-server/go.mod
+
+      - name: Run Go tests
+        working-directory: agfs-server
+        run: go test -v ./...
+
+  failpoint-tests:
+    name: failpoint tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: agfs-server/go.mod
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install failpoint-ctl
+        working-directory: agfs-server
+        run: go install github.com/pingcap/failpoint/failpoint-ctl@latest
+
+      - name: Run failpoint tests
+        working-directory: agfs-server
+        run: python3 scripts/run_failpoint_tests.py
