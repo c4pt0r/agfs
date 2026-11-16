@@ -1,0 +1,1 @@
+docker exec agfs sh -c "fusermount3 --version || (apt-get update -qq && apt-get install -y -qq fuse3 && fusermount3 --version)"

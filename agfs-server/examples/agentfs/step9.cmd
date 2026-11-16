@@ -1,0 +1,1 @@
+docker exec agfs sh -c "grep -a agentfs /tmp/server.log | tail -20"

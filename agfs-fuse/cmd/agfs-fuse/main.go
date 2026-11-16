@@ -19,13 +19,14 @@ import (
 
 func main() {
 	var (
-		serverURL   = flag.String("agfs-server-url", "http://localhost:8080", "AGFS server URL")
-		mountpoint  = flag.String("mount", "", "Mount point directory")
-		cacheTTL    = flag.Duration("cache-ttl", 5*time.Second, "Cache TTL duration")
-		debug       = flag.Bool("debug", false, "Enable debug output")
-		logLevel    = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
-		allowOther  = flag.Bool("allow-other", false, "Allow other users to access the mount")
-		showVersion = flag.Bool("version", false, "Show version information")
+		serverURL     = flag.String("agfs-server-url", "http://localhost:8080", "AGFS server URL")
+		mountpoint    = flag.String("mount", "", "Mount point directory")
+		cacheTTL      = flag.Duration("cache-ttl", 5*time.Second, "Cache TTL duration")
+		streamTimeout = flag.Duration("stream-timeout", 5*time.Minute, "Max inactivity between bytes on streaming reads (slow generations)")
+		debug         = flag.Bool("debug", false, "Enable debug output")
+		logLevel      = flag.String("log-level", "info", "Log level (debug, info, warn, error)")
+		allowOther    = flag.Bool("allow-other", false, "Allow other users to access the mount")
+		showVersion   = flag.Bool("version", false, "Show version information")
 	)
 
 	flag.Usage = func() {
@@ -75,9 +76,10 @@ func main() {
 
 	// Create filesystem
 	root := fusefs.NewAGFSFS(fusefs.Config{
-		ServerURL: *serverURL,
-		CacheTTL:  *cacheTTL,
-		Debug:     *debug,
+		ServerURL:     *serverURL,
+		CacheTTL:      *cacheTTL,
+		Debug:         *debug,
+		StreamTimeout: *streamTimeout,
 	})
 
 	// Setup FUSE mount options

@@ -1,0 +1,1 @@
+docker exec agfs sh -c "cd /src/agfs-fuse && GOPROXY=https://goproxy.cn,direct go build -o /usr/local/bin/agfs-fuse ./cmd/agfs-fuse && agfs-fuse --version"

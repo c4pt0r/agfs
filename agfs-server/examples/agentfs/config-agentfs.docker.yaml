@@ -1,0 +1,17 @@
+server:
+  address: ":8080"
+  log_level: info
+
+plugins:
+  agentfs:
+    enabled: true
+    path: /ai
+    config:
+      api_base_url: "http://host.docker.internal:11434/v1"
+      api_key: ""
+      model: "qwen2.5:7b"        # any model available in local Ollama
+      skills_dir: "./skills"
+      default_ttl: "5m"
+      max_tool_calls: 6
+      timeout_seconds: 120
+      allow_shell: false

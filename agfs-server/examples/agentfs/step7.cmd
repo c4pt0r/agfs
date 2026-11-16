@@ -1,0 +1,2 @@
+docker exec -d agfs sh -c "mkdir -p /mnt/agfs && /src/agfs-fuse-linux --agfs-server-url http://localhost:8080 --mount /mnt/agfs > /tmp/fuse.log 2>&1"
+docker exec agfs sh -c "sleep 2 && mount | grep agfs; cat /tmp/fuse.log"
