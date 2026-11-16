@@ -1,0 +1,21 @@
+server:
+  address: ":8080"
+  log_level: info
+
+plugins:
+  agentfs:
+    enabled: true
+    path: /ai
+    config:
+      # OpenAI-compatible endpoint.
+      # OpenAI: https://api.openai.com/v1  (api_key required)
+      # Ollama: http://localhost:11434/v1  (api_key can stay empty; in Docker on
+      #         Windows use http://host.docker.internal:11434/v1)
+      api_base_url: "http://localhost:11434/v1"
+      api_key: ""
+      model: "gpt-4o-mini"        # Ollama example: qwen2.5:7b
+      # skills_dir: "./skills"    # optional: preload *.md skills from host dir
+      default_ttl: "5m"
+      max_tool_calls: 6
+      timeout_seconds: 120
+      allow_shell: false          # true = agent may run shell commands (dangerous)

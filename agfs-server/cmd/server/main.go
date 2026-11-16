@@ -13,6 +13,7 @@ import (
 	"github.com/c4pt0r/agfs/agfs-server/pkg/mountablefs"
 	"github.com/c4pt0r/agfs/agfs-server/pkg/plugin"
 	"github.com/c4pt0r/agfs/agfs-server/pkg/plugin/api"
+	"github.com/c4pt0r/agfs/agfs-server/pkg/plugins/agentfs"
 	"github.com/c4pt0r/agfs/agfs-server/pkg/plugins/devfs"
 	"github.com/c4pt0r/agfs/agfs-server/pkg/plugins/gptfs"
 	"github.com/c4pt0r/agfs/agfs-server/pkg/plugins/heartbeatfs"
@@ -45,6 +46,7 @@ type PluginFactory func() plugin.ServicePlugin
 
 // availablePlugins maps plugin names to their factory functions
 var availablePlugins = map[string]PluginFactory{
+	"agentfs":        func() plugin.ServicePlugin { return agentfs.NewAgentFSPlugin() },
 	"devfs":          func() plugin.ServicePlugin { return devfs.NewDevFSPlugin() },
 	"serverinfofs":   func() plugin.ServicePlugin { return serverinfofs.NewServerInfoFSPlugin() },
 	"memfs":          func() plugin.ServicePlugin { return memfs.NewMemFSPlugin() },

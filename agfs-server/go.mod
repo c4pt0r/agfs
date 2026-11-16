@@ -1,6 +1,6 @@
 module github.com/c4pt0r/agfs/agfs-server
 
-go 1.25.1
+go 1.26.0
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.39.2
@@ -14,9 +14,11 @@ require (
 	github.com/hashicorp/go-immutable-radix v1.3.1
 	github.com/mattn/go-sqlite3 v1.14.32
 	github.com/pingcap/failpoint v0.0.0-20251231045439-91d91e123837
+	github.com/sashabaranov/go-openai v1.43.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/tetratelabs/wazero v1.9.0
 	github.com/zeebo/xxh3 v1.0.2
+	golang.org/x/sync v0.25.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

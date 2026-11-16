@@ -31,6 +31,12 @@ type Config struct {
 	CacheTTL  time.Duration
 	Debug     bool
 
+	// StreamTimeout bounds per-chunk inactivity for streaming reads. First
+	// reads may take minutes while the server generates content; <= 0
+	// falls back to 5 minutes (the SDK default of 60s is too short for
+	// agentfs generations).
+	StreamTimeout time.Duration
+
 	// MetaCacheMaxEntries caps the metadata cache size. <= 0 falls back to
 	// defaultMetaCacheMaxEntries; an unbounded cache is not exposed via this
 	// constructor to prevent OOM on long-lived mounts. Override only with
@@ -52,11 +58,16 @@ const (
 
 // NewAGFSFS creates a new AGFS FUSE filesystem
 func NewAGFSFS(config Config) *AGFSFS {
-	// Use longer timeout for FUSE operations (streams may block)
-	httpClient := &http.Client{
-		Timeout: 60 * time.Second,
-	}
+	// No total client timeout: streaming reads may legitimately take minutes
+	// while the server generates content. The streaming progress watchdog
+	// below bounds stalls instead.
+	httpClient := &http.Client{}
 	client := agfs.NewClientWithHTTPClient(config.ServerURL, httpClient)
+	streamTimeout := config.StreamTimeout
+	if streamTimeout <= 0 {
+		streamTimeout = 5 * time.Minute
+	}
+	client.SetStreamingProgressTimeout(streamTimeout)
 
 	metaMax := config.MetaCacheMaxEntries
 	if metaMax <= 0 {

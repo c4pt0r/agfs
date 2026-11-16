@@ -1,0 +1,1 @@
+docker exec agfs sh -c "cat /mnt/agfs/ai/news.md"

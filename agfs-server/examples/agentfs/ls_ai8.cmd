@@ -1,0 +1,1 @@
+docker exec agfs sh -c "ls /mnt/agfs && echo --- && ls /mnt/agfs/ai && echo --- && head -10 /mnt/agfs/ai/README.md"

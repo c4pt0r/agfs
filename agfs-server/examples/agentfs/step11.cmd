@@ -1,0 +1,1 @@
+docker exec agfs sh -c "cat /mnt/agfs/ai/devices/online.txt; echo ---; cat /mnt/agfs/ai/devices/api_health.json"

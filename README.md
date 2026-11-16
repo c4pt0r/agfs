@@ -57,6 +57,15 @@ make dev
 curl http://localhost:8080/api/v1/health
 ```
 
+To build both binaries instead:
+
+```bash
+cd agfs-server && CGO_ENABLED=0 go build -o build/agfs-server ./cmd/server
+cd ../agfs-fuse && CGO_ENABLED=0 go build -o build/agfs-fuse ./cmd/agfs-fuse
+```
+
+See [docs/build.md](./docs/build.md) for cross-compilation, the Docker build path, and the FUSE `--stream-timeout` option.
+
 Copy `config.example.yaml` to `config.yaml` only when you need local customization.
 
 For a complete first-run matrix across installer, source, Docker, shell, webapp, FUSE, and MCP paths, see [docs/first-run.md](./docs/first-run.md).
